@@ -12,8 +12,8 @@ This repository contains the R, Perl, and Shell scripts used to:
   methylation pipelines).
 - Define a **five-omics molecular subtype (CMOS)** with
   [MOVICS](https://github.com/xlucpu/MOVICS) (NEMO consensus clustering), and
-  classify samples—including single-cell pseudobulk profiles—with a random
-  forest classifier trained on bulk transcriptomic data.
+  classify samples (including single-cell pseudobulk profiles—with a random
+  forest classifier trained on bulk transcriptomic data).
 - Detect **chromothripsis** events (ShatterSeek) from structural variants and
   copy-number segments.
 - Quantify **cis** and **trans** effects of somatic SNV/indel driver mutations
@@ -27,10 +27,10 @@ This repository contains the R, Perl, and Shell scripts used to:
 
 | Directory | Contents |
 |-----------|----------|
-| `molecular_subtyping/` | `runMOVICS.R` — five-omics data integration and CMOS definition via MOVICS. `CMOSclassifier.R` — random forest classifier trained on bulk RNA, projected onto single-cell pseudobulk. 
+| `molecular_subtyping/` | `runMOVICS.R` (CMOS definition via MOVICS). `CMOSclassifier.R` (random forest classifier trained on bulk RNA, projected onto single-cell pseudobulk.) 
 | `pipeline/` | `WGS_Pipeline_v1.0.pl` (Sentieon-based WGS data process pipline), `SomaticMutationDetect_v1.0.pl`(somatic mutation detection pipeline), `WGBS_Pipeline_v1.0.pl` (WGBS methylation pipeline), `runBRASS.sh` (structural variant detection). |
-| `shatterseek/` | `run_shatterseek.R` — chromothripsis detection with ShatterSeek across a sample list. |
-| `cis_trans_analysis/` | `01.snvindel.cis_effect.R` (cis effects), `02.focal_cnv.cis_effect.R` (cis effects), `03.sv_hotspots.cis_effect.R` (cis effects); `04.trans_effect.R` (trans effects). Linear-regression framework with optional parallelization. |
+| `shatterseek/` | `run_shatterseek.R` (chromothripsis detection with ShatterSeek). |
+| `cis_trans_analysis/` | `01.snvindel.cis_effect.R` (cis effects for driver mutations), `02.focal_cnv.cis_effect.R` (cis effects for focal CNVs), `03.sv_hotspots.cis_effect.R` (cis effects for SV hotspots); `04.trans_effect.R` (trans effects). Linear-regression framework. |
 | `prognosis_analysis/` | `01.cox_regression.Rmd` (univariate / multivariate Cox regression for OS and DFS); `02.prognostic_models_cindex.Rmd` (C-index evaluation, LASSO prognostic models, and Kaplan–Meier plots). |
 | `plotting/` | `plot_for_APC_inversion.R` (APC inversion), `plotHeatmap_for_MSIsample.R` (mutation/expression/methylation landscape for MSI samples), `plotHeatmap_for_CMOSfeature.R` (CMOS tumor microenvironment / immune heatmap). |
 
