@@ -1,0 +1,1544 @@
+### config
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(readxl)
+library(ggsci)
+library(igraph)
+library(glmnet)
+library(purrr)
+library(ggpubr)
+library(foreach)
+library(impute)
+library(survminer)
+library(ConsensusClusterPlus)
+library(cowplot)
+library(dplyr)
+library(tidyr)
+
+library(patchwork)
+library(ggplot2)
+library(ComplexHeatmap)
+library(survival)
+library(survivalROC)
+library(gridExtra)
+library(grid)
+library(extrafont)
+library(scales)
+library(caret)
+library(stringr)
+loadfonts()
+Arial <- Type1Font(family = "Arial",
+                   metrics = c("ArialMT.afm",
+                               "ArialMT-Bold.afm", 
+                               "ArialMT-Italic.afm",
+                               "ArialMT-BoldItalic.afm")
+                   )
+pdfFonts(Arial = Arial)
+```
+
+
+### input
+```{r}
+load(file = "clindata_input.RData")
+load(file = "methylation_mean.binary.RData")
+load(file = "1005s_RNA_FPKM_log2_plus1.RData")
+load(file = "protein.RData")
+load(file = "sv_hotspot.RData")
+load(file = "signature.RData")
+load(file = "435sample_list.RData")
+load(file = "focal_cnv.RData")
+load(file = "snv_drivers.RData")
+chemo_dat <- as.data.frame(read.table(file = "clinic.txt", sep="\t",header=T))
+
+#### significant features to build pronostic models
+dfs_sig_features_input = "sig_variables.all.types.dfs.txt"
+os_sig_features_input = "sig_variables.all.types.os.txt"
+
+dfs_sig_features_names <- read.table(dfs_sig_features_input, sep="\t", header = T, check.names=F)
+dfs_selected_features <- dfs_sig_features_names$factor
+os_sig_features_names <- read.table(os_sig_features_input, sep="\t", header = T, check.names=F)
+os_selected_features <- os_sig_features_names$factor
+
+############### RNA scales input to [0,1], reduce highly correlated factors
+### DFS
+exp_dat_selected <- exp_dat[patient_id,colnames(exp_dat) %in% c(dfs_selected_features)]
+exp_dat_selected_scaled <- rescale(as.matrix(exp_dat_selected), to = c(0, 1)) %>% data.frame(check.names=F)
+cor_matrix <- cor(exp_dat_selected_scaled, use = "complete.obs")
+exp_dat_high_corr_index <- findCorrelation(cor_matrix, cutoff = 0.75, verbose = FALSE, names = FALSE)
+colnames(exp_dat_selected_scaled)[exp_dat_high_corr_index]
+exp_dat_selected_scaled_reduced_dfs <- exp_dat_selected_scaled[, -exp_dat_high_corr_index]
+exp_dat_selected_scaled_reduced_dfs$Sample <- rownames(exp_dat_selected_scaled_reduced_dfs)
+### OS
+exp_dat_selected <- exp_dat[patient_id,colnames(exp_dat) %in% c(os_selected_features)]
+exp_dat_selected_scaled <- rescale(as.matrix(exp_dat_selected), to = c(0, 1)) %>% data.frame(check.names=F)
+cor_matrix <- cor(exp_dat_selected_scaled, use = "complete.obs")
+exp_dat_high_corr_index <- findCorrelation(cor_matrix, cutoff = 0.75, verbose = FALSE, names = FALSE)
+colnames(exp_dat_selected_scaled)[exp_dat_high_corr_index]
+exp_dat_selected_scaled_reduced_os <- exp_dat_selected_scaled[, -exp_dat_high_corr_index]
+exp_dat_selected_scaled_reduced_os$Sample <- rownames(exp_dat_selected_scaled_reduced_os)
+
+################ Protein, reduce highly correlated factors
+### DFS
+pro_dat_selected <- pro_dat[patient_id,colnames(pro_dat) %in% c(dfs_selected_features)]
+pro_dat_selected_scaled <- rescale(as.matrix(pro_dat_selected), to = c(0, 1)) %>% data.frame(check.names=F) 
+cor_matrix <- cor(pro_dat_selected_scaled, use = "complete.obs")
+pro_dat_high_corr_index <- findCorrelation(cor_matrix, cutoff = 0.75, verbose = FALSE, names = FALSE)
+colnames(pro_dat_selected_scaled)[pro_dat_high_corr_index]
+pro_dat_selected_scaled_reduced_dfs <- pro_dat_selected_scaled[, -pro_dat_high_corr_index]
+pro_dat_selected_scaled_reduced_dfs$Sample <- rownames(pro_dat_selected_scaled_reduced_dfs)
+### OS
+pro_dat_selected <- pro_dat[patient_id,colnames(pro_dat) %in% c(os_selected_features)]
+pro_dat_selected_scaled <- rescale(as.matrix(pro_dat_selected), to = c(0, 1)) %>% data.frame(check.names=F) 
+cor_matrix <- cor(pro_dat_selected_scaled, use = "complete.obs")
+pro_dat_high_corr_index <- findCorrelation(cor_matrix, cutoff = 0.75, verbose = FALSE, names = FALSE)
+colnames(pro_dat_selected_scaled)[pro_dat_high_corr_index]
+pro_dat_selected_scaled_reduced_os <- pro_dat_selected_scaled[, -pro_dat_high_corr_index]
+pro_dat_selected_scaled_reduced_os$Sample <- rownames(pro_dat_selected_scaled_reduced_os)
+
+################ clinical
+Age_selected <- clin_dat[patient_id,"Age",drop=FALSE]
+Age_selected_scaled <- rescale(as.matrix(Age_selected), to = c(0, 1)) %>% data.frame(check.names=F) 
+Age_selected_scaled$Sample <- rownames(Age_selected_scaled)
+
+TNM_selected <- clin_dat[patient_id,"TNM_Stage",drop=FALSE]
+TNM_selected_scaled <- rescale(as.matrix(TNM_selected), to = c(0, 1)) %>% data.frame(check.names=F) 
+TNM_selected_scaled$Sample <- rownames(TNM_selected_scaled)
+
+############### methylation, reduce highly correlated factors (no highly correlated Methylation results)
+### DFS
+methylation_df_selected <- methylation_df[patient_id,colnames(methylation_df) %in% c(dfs_selected_features)]
+cor_matrix <- cor(methylation_df_selected, use = "complete.obs")
+methylation_df_high_corr_index <- findCorrelation(cor_matrix, cutoff = 0.75, verbose = FALSE, names = FALSE)
+colnames(methylation_df_selected)[methylation_df_high_corr_index]
+### OS
+methylation_df_selected <- methylation_df[patient_id,colnames(methylation_df) %in% c(os_selected_features)]
+cor_matrix <- cor(methylation_df_selected, use = "complete.obs")
+methylation_df_high_corr_index <- findCorrelation(cor_matrix, cutoff = 0.75, verbose = FALSE, names = FALSE)
+colnames(methylation_df_selected)[methylation_df_high_corr_index]
+
+tab_4_dfs_cox <- Age_selected_scaled[patient_id,] %>%
+  left_join(TNM_selected_scaled, by = "Sample") %>%
+  left_join(exp_dat_selected_scaled_reduced_dfs, by = "Sample") %>%
+  left_join(methylation_df, by = "Sample") %>%
+  left_join(snv_driver_tab, by = "Sample") %>%
+  left_join(focal_cnv, by = "Sample") %>%
+  left_join(pro_dat_selected_scaled_reduced_dfs, by = "Sample") %>%
+  left_join(sv_tab, by = "Sample") %>%
+  left_join(sur_dat[, c("Sample", "sur_dfs")], by = "Sample")
+
+tab_4_os_cox <- Age_selected_scaled[patient_id,] %>%
+  left_join(TNM_selected_scaled, by = "Sample") %>%
+  left_join(exp_dat_selected_scaled_reduced_os, by = "Sample") %>%
+  left_join(methylation_df, by = "Sample") %>%
+  left_join(pro_dat_selected_scaled_reduced_os, by = "Sample") %>%
+  left_join(snv_driver_tab, by = "Sample") %>%
+  left_join(focal_cnv, by = "Sample") %>%
+  left_join(sv_tab, by = "Sample") %>%
+  left_join(sur_dat[, c("Sample", "sur_os")], by = "Sample")
+
+
+colnames(tab_4_dfs_cox) <- gsub("-", "_", colnames(tab_4_dfs_cox))  
+colnames(tab_4_os_cox) <- gsub("-", "_", colnames(tab_4_os_cox))
+colnames(tab_4_dfs_cox) <- gsub("/", "_", colnames(tab_4_dfs_cox))  
+colnames(tab_4_os_cox) <- gsub("/", "_", colnames(tab_4_os_cox))  
+colnames(tab_4_dfs_cox) <- gsub(",", ".", colnames(tab_4_dfs_cox))  
+colnames(tab_4_os_cox) <- gsub(",", ".", colnames(tab_4_os_cox))
+
+## check if features in tab or not
+dfs_selected_features[!sapply(dfs_selected_features, function(x) x %in% colnames(tab_4_dfs_cox))]
+os_selected_features[!sapply(os_selected_features, function(x) x %in% colnames(tab_4_os_cox))]
+
+tab_4_dfs_sig_cox <- tab_4_dfs_cox[,colnames(tab_4_dfs_cox) %in% c("Sample","sur_dfs",dfs_selected_features)]
+tab_4_os_sig_cox <- tab_4_os_cox[,colnames(tab_4_os_cox) %in% c("Sample","sur_os",os_selected_features)]
+
+### test highly correlated factors in tab
+tab_4_dfs_sig_cox_tmp <- tab_4_dfs_sig_cox %>% select(-Sample,-sur_dfs)
+cor_matrix <- cor(tab_4_dfs_sig_cox_tmp, use = "complete.obs")
+tab_4_dfs_sig_high_corr_index <- findCorrelation(cor_matrix, cutoff = 0.75, verbose = FALSE, names = FALSE)
+colnames(tab_4_dfs_sig_cox_tmp)[tab_4_dfs_sig_high_corr_index]
+
+tab_4_os_sig_cox_tmp <- tab_4_os_sig_cox %>% select(-Sample,-sur_os)
+cor_matrix <- cor(tab_4_os_sig_cox_tmp, use = "complete.obs")
+tab_4_os_sig_high_corr_index <- findCorrelation(cor_matrix, cutoff = 0.75, verbose = FALSE, names = FALSE)
+colnames(tab_4_os_sig_cox_tmp)[tab_4_os_sig_high_corr_index]
+
+### scale all to Z scores
+rownames(tab_4_dfs_sig_cox) <- tab_4_dfs_sig_cox$Sample
+tab_4_dfs_sig_cox <- scale(tab_4_dfs_sig_cox%>%select(-Sample,-sur_dfs)) %>% data.frame(check.names=F)
+tab_4_dfs_sig_cox$Sample <- rownames(tab_4_dfs_sig_cox)
+
+tab_4_dfs_sig_cox <- tab_4_dfs_sig_cox %>%
+  left_join(sur_dat[, c("Sample", "sur_dfs")], by = "Sample")
+
+rownames(tab_4_os_sig_cox) <- tab_4_os_sig_cox$Sample
+tab_4_os_sig_cox <- scale(tab_4_os_sig_cox%>%select(-Sample,-sur_os)) %>% data.frame(check.names=F)
+tab_4_os_sig_cox$Sample <- rownames(tab_4_os_sig_cox)
+tab_4_os_sig_cox <- tab_4_os_sig_cox %>%
+  left_join(sur_dat[, c("Sample", "sur_os")], by = "Sample")
+
+####re-select significant features to build pronostic models
+dfs_sig_features_names <- dfs_sig_features_names[dfs_sig_features_names$factor %in% colnames(tab_4_dfs_sig_cox),]
+dfs_selected_features <- dfs_sig_features_names$factor
+os_sig_features_names <- os_sig_features_names[os_sig_features_names$factor %in% colnames(tab_4_os_sig_cox),]
+os_selected_features <- os_sig_features_names$factor
+
+
+## save inputs
+save(tab_4_dfs_sig_cox, tab_4_os_sig_cox, dfs_selected_features, os_selected_features, dfs_sig_features_names, os_sig_features_names, chemo_dat, file = "model_features.20250612.RData")
+
+```
+
+
+### 1000-times 8:2 sample split (Lasso + split-validation C-index), combine with 435 Sample lasso results KM
+
+##### 435s, 8:2 sample split lasso, for cindex calculation
+###### functions for 8:2 sample split (Lasso + split-validation C-index) 
+```{r}
+cindex_28_fun_os <- function(seed = 1234, tab_4_cox_28 = tab_4_os_sig_cox, test_list = test_os, cox_res_sig = os_sig_features_names){
+  res <- tryCatch({
+    set.seed(seed)
+    train_idx <- sort(sample(c(1:nrow(tab_4_cox_28)),  size = round(nrow(tab_4_cox_28)*0.8)))
+    test_idx <- setdiff(c(1:nrow(tab_4_cox_28)), train_idx)
+    
+    cox_fit_list <- lapply(1:length(test_list), function(i){
+      
+      set.seed(seed)
+      cv.fit_ <- cv.glmnet(x = as.matrix(tab_4_cox_28[ train_idx, cox_res_sig$factor[cox_res_sig$omics %in% test_list[[i]]] ]),
+                           y = tab_4_cox_28[train_idx, ]$sur_os,
+                           family="cox", parallel = T, alpha=1)
+      fit_ <- glmnet(x = as.matrix(tab_4_cox_28[ train_idx, cox_res_sig$factor[cox_res_sig$omics %in% test_list[[i]]] ]),
+                     y = tab_4_cox_28[train_idx, ]$sur_os,
+                     family="cox", alpha=1)
+      s_ <- cv.fit_$lambda.min
+      lasso_factor <- names(coef(fit_)[,fit_[["lambda"]] == s_] [coef(fit_)[,fit_[["lambda"]] == s_]!=0 ])
+      rm(cv.fit_, fit_, s_)
+      
+      formula = as.formula(paste("sur_os", " ~ ", paste(lasso_factor, collapse = "+") ))
+      
+      cox_model <- survival::coxph(formula,data = tab_4_cox_28[train_idx, ])
+      list(
+        model = cox_model,
+        factors = lasso_factor
+      )
+    })
+    
+    names(cox_fit_list) <- sapply(test_list, function(i){paste(i, collapse = "+")})
+    
+    cindx_tab1 <- data.frame(model = names(cox_fit_list),
+                             cindex = sapply(cox_fit_list, function(x){
+                               survival::concordance(x$model, newdata = tab_4_cox_28[test_idx, ])[[1]]}),
+                             seed = seed,
+                            factors = sapply(cox_fit_list, function(x){
+                              paste(x$factors, collapse = ";")
+                            }))
+    cindx_tab1
+  }, error = function(e){
+    cindx_tab1 <- data.frame(model = c(sapply(test_list, function(i){paste(i, collapse = "+")})),cindex = NA,seed = seed,factors=NA)
+    cindx_tab1
+    message("error messages: ", e$message)
+  })
+  
+  res
+  
+}
+
+cindex_28_fun_dfs <- function(seed = 1234, tab_4_cox_28 = tab_4_dfs_sig_cox, test_list = test_dfs, cox_res_sig = dfs_sig_features_names){
+  res <- tryCatch({
+    set.seed(seed)
+    train_idx <- sort(sample(c(1:nrow(tab_4_cox_28)),  size = round(nrow(tab_4_cox_28)*0.8)))
+    test_idx <- setdiff(c(1:nrow(tab_4_cox_28)), train_idx)
+  
+    cox_fit_list <- lapply(1:length(test_list), function(i){
+      if(i == 1){                        
+        cox_model <- survival::coxph(as.formula(paste("sur_dfs", " ~ ", "TNM_Stage" )),
+                        data = tab_4_cox_28[train_idx, ])
+        list(
+            model = cox_model,
+            factors = "TNM_Stage"
+          )
+        
+      } else {
+        set.seed(seed)
+        cv.fit_ <- cv.glmnet(x = as.matrix(tab_4_cox_28[ train_idx, cox_res_sig$factor[cox_res_sig$omics %in% test_list[[i]]] ]),
+                             y = tab_4_cox_28[train_idx, ]$sur_dfs,
+                             family="cox", parallel = T, alpha=1)
+        fit_ <- glmnet(x = as.matrix(tab_4_cox_28[ train_idx, cox_res_sig$factor[cox_res_sig$omics %in% test_list[[i]]] ]),
+                       y = tab_4_cox_28[train_idx, ]$sur_dfs,
+                       family="cox", alpha=1)
+        s_ <- cv.fit_$lambda.min
+        lasso_factor <- names(coef(fit_)[,fit_[["lambda"]] == s_] [coef(fit_)[,fit_[["lambda"]] == s_]!=0 ])
+        rm(cv.fit_, fit_, s_)
+        
+        cox_model <- survival::coxph(as.formula(paste("sur_dfs", " ~ ", paste(lasso_factor, collapse = " + ") )),
+                        data = tab_4_cox_28[train_idx, ])
+        list(
+            model = cox_model,
+            factors = lasso_factor
+          )
+      }
+    })
+    names(cox_fit_list) <- c(sapply(test_list, function(i){paste(i, collapse = "+")}))
+    
+    cindx_tab1 <- data.frame(model = names(cox_fit_list),
+                             cindex = sapply(cox_fit_list, function(x){
+                          survival::concordance(x$model, newdata = tab_4_cox_28[test_idx, ])[[1]]}),
+                             seed = seed,
+                            factors = sapply(cox_fit_list, function(x){
+                              paste(x$factors, collapse = ";")
+                            }))
+    
+    cindx_tab1
+  }, error = function(e){
+    cindx_tab1 <- data.frame(model = c(sapply(test_list, function(i){paste(i, collapse = "+")})),
+                             cindex = NA,
+                             seed = seed,
+                             factor=NA)
+    cindx_tab1
+    message("error messages: ", e$message)
+  })
+  
+  res
+  
+}
+
+```
+
+###### runing 1000 times 8:2 sample split (Lasso + split-validation C-index) 
+```{r}
+
+load(file = "model_features.20250612.RData")
+rownames(tab_4_dfs_sig_cox) <- tab_4_dfs_sig_cox$Sample
+rownames(tab_4_os_sig_cox) <- tab_4_os_sig_cox$Sample
+
+os_all_feature_types <- sort(unique(os_sig_features_names$omics))
+test_os <- c(combn(os_all_feature_types, m = 1, simplify = FALSE), 
+              combn(os_all_feature_types, m = 2, simplify = FALSE),
+              combn(os_all_feature_types, m = 3, simplify = FALSE),
+              combn(os_all_feature_types, m = 4, simplify = FALSE))
+
+dfs_all_feature_types <- sort(unique(dfs_sig_features_names$omics))
+test_dfs <- c(combn(dfs_all_feature_types, m = 1, simplify = FALSE), 
+              combn(dfs_all_feature_types, m = 2, simplify = FALSE),
+              combn(dfs_all_feature_types, m = 3, simplify = FALSE),
+              combn(dfs_all_feature_types, m = 4, simplify = FALSE),
+              combn(dfs_all_feature_types, m = 5, simplify = FALSE))
+
+cindex_28_1000res_os <- do.call(rbind, lapply(1:1000, function(ii){cindex_28_fun_os(seed = ii)}))
+
+cindex_28_1000res_dfs <- do.call(rbind, lapply(1:1000, function(ii){cindex_28_fun_dfs(seed = ii)}))
+
+write_tsv(cindex_28_1000res_dfs, file = "cindex_dfs_20251030.tsv")
+write_tsv(cindex_28_1000res_os, file = "cindex_os_20251030.tsv")
+
+```
+
+
+##### 435s All sample lasso, for stage split KM-p values calculations
+###### search markers for every combinations
+```{r}
+
+load(file = "model_features.20250612.RData")
+############## use all samples dataset to filter features for every combinations
+### create every combinations for all features, dfs 
+dfs_all_feature_types <- sort(unique(dfs_sig_features_names$omics))
+dfs_combn_list <- c()
+for (i in 1:length(dfs_all_feature_types)) {
+  combn_ <- combn(dfs_all_feature_types,i,simplify = FALSE)
+  dfs_combn_list <- c(dfs_combn_list, combn_)
+}
+
+# combn_list <- keep(combn_list, ~ !any(.x == "Clinical"))
+dfs_combn_list
+
+### create every combinations for all features, os 
+os_all_feature_types <- sort(unique(os_sig_features_names$omics))
+os_combn_list <- c()
+for (i in 1:length(os_all_feature_types)) {
+  combn_ <- combn(os_all_feature_types,i,simplify = FALSE)
+  os_combn_list <- c(os_combn_list, combn_)
+}
+
+# combn_list <- keep(combn_list, ~ !any(.x == "Clinical"))
+os_combn_list
+
+if (setequal(os_combn_list, dfs_combn_list)) {
+  combn_list <- dfs_combn_list
+  print("combn_lists for dfs and os are the same")
+} else{
+  print("combn_lists for dfs and os are not the same!!!!!!!!!!!!!")
+  combn_list <- dfs_combn_list
+  # q()
+}
+
+################## lasso for every combinations, sur_dfs, tab_4_dfs_sig_cox
+sig_features_names <- dfs_sig_features_names
+dfs_lasso_results_list <- lapply(dfs_combn_list, function(i){
+  print(i)
+  combn_features <- sig_features_names[sig_features_names$omics %in% i,"factor"]
+  tab_4_dfs_sig_cox_tmp <- tab_4_dfs_sig_cox[,colnames(tab_4_dfs_sig_cox) %in% c(combn_features,"sur_dfs"),drop=FALSE]
+  tab_4_dfs_sig_cox_tmp <- tab_4_dfs_sig_cox_tmp[complete.cases(tab_4_dfs_sig_cox_tmp),]
+  x_data <- as.matrix(tab_4_dfs_sig_cox_tmp%>%select(-sur_dfs))
+  y_data <- tab_4_dfs_sig_cox_tmp$sur_dfs
+  if (length(combn_features)>1) {
+    ### lasso regression
+  set.seed(1234)
+  cv.fit_ <- cv.glmnet(x = x_data,
+                      y = y_data,
+                      family="cox", parallel = F, alpha=1)
+  ### min lambda from lasso
+  s_ <- cv.fit_$lambda.min
+  
+  ### all coef
+  fit_ <- glmnet(x = x_data,
+                y = y_data,
+                family="cox", alpha=1)
+    
+  ### find min lambda coefs, remove 0
+  lasso_factor_ <- names(coef(fit_)[,fit_[["lambda"]] == s_] [coef(fit_)[,fit_[["lambda"]] == s_]!=0 ])
+  lasso_factor_
+  } else {
+    combn_features
+  }
+  
+  })
+
+names(dfs_lasso_results_list) <- c(sapply(dfs_combn_list, function(x) paste(x,collapse=" + ")))
+
+save(dfs_lasso_results_list, file="dfs.all_combn.lasso.RData")
+
+################## lasso for every combinations, sur_os, tab_4_os_sig_cox
+sig_features_names <- os_sig_features_names
+
+os_lasso_results_list <- lapply(os_combn_list, function(i){
+  print(i)
+  combn_features <- sig_features_names[sig_features_names$omics %in% i,"factor"]
+  tab_4_os_sig_cox_tmp <- tab_4_os_sig_cox[,colnames(tab_4_os_sig_cox) %in% c(combn_features,"sur_os")]
+  tab_4_os_sig_cox_tmp <- tab_4_os_sig_cox_tmp[complete.cases(tab_4_os_sig_cox_tmp),]
+  x_data <- as.matrix(tab_4_os_sig_cox_tmp%>%select(-sur_os))
+  y_data <- tab_4_os_sig_cox_tmp$sur_os
+  if (length(combn_features)>1) {
+    ### lasso regression
+  set.seed(1234)
+  cv.fit_ <- cv.glmnet(x = x_data,
+                      y = y_data,
+                      # family="cox", parallel = F, alpha=1)
+                      family="cox", parallel = F, alpha=1)
+  ### min lambda from lasso
+  s_ <- cv.fit_$lambda.min
+  plot(cv.fit_)
+  print(s_)
+  ### all coef
+  fit_ <- glmnet(x = x_data,
+                y = y_data,
+                family="cox", alpha=1)
+    
+  ### find min lambda coefs, remove 0
+  lasso_factor_ <- names(coef(fit_)[,fit_[["lambda"]] == s_] [coef(fit_)[,fit_[["lambda"]] == s_]!=0 ])
+  print(fit_$lambda)
+  lasso_factor_
+  } else {
+    combn_features
+  }
+  
+  })
+
+names(os_lasso_results_list) <- c(sapply(os_combn_list, function(x) paste(x,collapse=" + ")))
+
+save(os_lasso_results_list, file="os.all_combn.lasso.RData")
+
+
+```
+
+
+###### prognostic models
+```{r}
+load(file="dfs.all_combn.lasso.RData")
+load(file="os.all_combn.lasso.RData")
+load(file = "model_features.20250612.RData")
+
+prognosis_model_fun <- function(seed = 1234, sur_model="",features_combn = c(), input_df=data.frame()){
+  
+  ############## cox results for all features
+  cox_fit_list <- do.call(list, Map(function(i,name){
+    print(name)
+
+    set.seed(seed)
+    input_df_tmp <- input_df[,c("Sample",i,sur_model)]
+    input_df_tmp <- input_df_tmp[complete.cases(input_df_tmp),]
+    total_samples <- nrow(input_df_tmp)
+    ############# cox results 
+    cox_results <- survival::coxph(as.formula(paste(sur_model, " ~ ", paste(i, collapse = " + ") )),data = input_df_tmp)
+    c_index <- survival::concordance(cox_results)$concordance
+    
+    ############# tab_coef
+    tab_coef_multi <- as.data.frame(summary(cox_results)[[7]]) %>% 
+      dplyr::mutate(features = rownames(as.data.frame(summary(cox_results)[[7]]))) %>% 
+      dplyr::arrange(desc(coef)) 
+
+    tab_risk_cox <- data.frame(input_df_tmp[, c("Sample", sur_model)],
+                               cox_rs = predict(cox_results, type = "risk", newdata = input_df_tmp[, i,drop=FALSE])) %>%
+      left_join(chemo_dat[, c("Sample", "chemotherapy")], by = "Sample") %>% 
+      left_join(input_df[, c("Sample", "TNM_Stage")], by = "Sample")
+
+    ############# features importance
+    wald_tab <- as.data.frame(summary(cox_results)[[7]]) %>% 
+      dplyr::filter(is.na(z) == F) %>% 
+      dplyr::mutate(abs_wald = abs(z))
+    wald_tab <- wald_tab %>% 
+      dplyr::mutate(factor_name = rownames(wald_tab)) %>% 
+      dplyr::select("factor_name", "abs_wald") %>% 
+      dplyr::mutate(prop_wald = (`abs_wald`/sum(wald_tab$`abs_wald`))*100) %>% 
+      dplyr::arrange(`prop_wald`)
+      
+    ############# return results
+    cindx_tab <- list(
+      model = name,  # 特征组合名称
+      c_index = c_index,          # C-index
+      # cox_results = cox_results,
+      tab_coef_multi = tab_coef_multi,
+      tab_risk_cox = tab_risk_cox,
+      wald_tab = wald_tab,
+      features = paste(i, collapse = ", "),
+      sample_num = total_samples,
+      seed=seed
+    )
+  
+    cindx_tab
+    
+  },features_combn, names(features_combn))
+  )
+  cox_fit_list
+  
+}
+
+## call functions with one seed
+prog_model_dfs <- prognosis_model_fun(seed = 1234, sur_model="sur_dfs", features_combn=dfs_lasso_results_list, input_df=tab_4_dfs_sig_cox)
+
+prog_model_os <- prognosis_model_fun(seed = 1234, sur_model="sur_os", features_combn=os_lasso_results_list, input_df=tab_4_os_sig_cox)
+
+save(prog_model_dfs,prognosis_model_fun, file="prog_model_dfs.Rdata")
+save(prog_model_os, file="prog_model_os.Rdata")
+
+```
+
+
+###### factor importance plots
+```{r}
+load(file="prog_model_dfs.Rdata")
+load(file="prog_model_os.Rdata")
+load(file = "model_features.20250612.RData")
+
+factor_importance_fuc <- function(model_list, name, model_name, output_dir) {
+  wald_tab_tmp <- model_list$wald_tab
+  height <- as.numeric(0.3*nrow(wald_tab_tmp) + 2)
+  print(name)
+  feature_list <- as.data.frame(feature_list,check.names=F) 
+  feature_list <- feature_list %>% 
+    select(factor,label,omics)
+  plot_input <- wald_tab_tmp %>% 
+    arrange(desc(prop_wald)) %>% 
+    mutate(factor_name = factor(factor_name, levels = unique(factor_name[order(prop_wald)]))) 
+  omics_colors <- c(
+  "CLI"        = "#9F2B1A",
+  "GEN"       = "#FF8868",
+  "MET"     = "#1D3C2D",
+  "PRO"         = "#3F2795",
+  "RNA"             = "#D45E97"
+)
+  
+  omics_colors_transparent <- setNames(
+    alpha(omics_colors, alpha = 0.8), 
+    names(omics_colors)
+  )
+  
+  p1 <- ggplot(plot_input,aes(x=`factor_name`, y=`prop_wald`))+
+    geom_bar(position=position_dodge(), stat="identity", width = 0.85)+
+    xlab("") +
+    ylab("")+
+    labs(title = "Features Importance")+
+    scale_y_continuous(position = "right")+
+    theme_classic() +
+    coord_flip() +
+    theme(title = element_text(hjust = 0.5, vjust = 0.5, 
+                               size = 16, color = "black", face = "bold", family = "Arial"),  
+          plot.title = element_text(hjust = 0.5, vjust = 0.5, 
+                               size = 16, color = "black", face = "bold", family = "Arial"), 
+          axis.ticks = element_blank(),
+          axis.line = element_blank(),
+          axis.text = element_text(size = 12, color = "black", family = "Arial"), 
+          axis.title = element_text(size = 12, color = "black", family = "Arial"),
+          legend.position = "right")
+  
+  
+  
+  file_name = paste0(output_dir,model_name,".",gsub("\\s*\\+\\s*", "_", name), ".factor_importance.pdf" )
+  ggsave(p1, file=file_name,device="pdf", width=8, height=height)
+}
+
+Map(factor_importance_fuc, prog_model_dfs, names(prog_model_dfs), model_name="dfs", output_dir="factor_importance_pdf/")
+
+Map(factor_importance_fuc, prog_model_os, names(prog_model_os), model_name="os", output_dir="factor_importance_pdf/")
+
+
+```
+
+
+
+
+###### chemotherapy KM plots functions
+```{r}
+plot_km_fun <- function(tab_4_kmplot, title = "", model_name, name, dirname,suffix){
+  
+  if (!dir.exists(dirname)) {
+    dir.create(dirname, recursive = TRUE)
+  }
+   risk_group <- tab_4_kmplot %>%
+    dplyr::filter(is.na(tab_4_kmplot[,model_name]) == F) %>%
+    dplyr::filter(is.na(`cox_rs`) == F) %>%
+    dplyr::mutate(risk_group = factor(ifelse(`cox_rs` <= median(`cox_rs`), "Low Risk", "High Risk"), levels = c("Low Risk", "High Risk"))) 
+   
+  ### High risk
+  high_risk <- risk_group %>%
+    dplyr::filter(risk_group == "High Risk") %>%
+    dplyr::mutate(labs = factor(chemotherapy, levels = c("Non-Chemotherapy", "Chemotherapy"))) %>%
+    dplyr::rename(sur = !!sym(model_name)) 
+  
+  cox_formula <- as.formula("sur ~ labs")
+  cox_model <- coxph(cox_formula, data=high_risk)
+  cox_res <- summary(cox_model)
+  HR <- signif(cox_res$coefficients[1,"exp(coef)"],digits=2)
+  HR_lower95 <- signif(cox_res$conf.int[1,"lower .95"],digits=2)
+  HR_upper95 <- signif(cox_res$conf.int[1,"upper .95"],digits=2)
+  HR_str_high_risk <- paste0("HR = ",HR, " (",HR_lower95," - ",HR_upper95,")")
+    
+  km_fit_high_risk <- survfit(sur ~ labs, data = high_risk)
+  p_val_high_risk <- survminer::surv_pvalue(km_fit_high_risk,data=high_risk)$pval
+  formatted_p_high_risk <- sprintf("%.5g", p_val_high_risk)  
+  formatted_p_high_risk <- paste0("P = ", formatted_p_high_risk)
+  
+  ### low risk
+  low_risk <- risk_group %>%
+    dplyr::filter(risk_group == "Low Risk") %>%
+    dplyr::mutate(labs = factor(chemotherapy, levels = c("Non-Chemotherapy", "Chemotherapy"))) %>%
+    dplyr::rename(sur = !!sym(model_name)) 
+  
+  cox_formula <- as.formula("sur ~ labs")
+  cox_model <- coxph(cox_formula, data=low_risk)
+  cox_res <- summary(cox_model)
+  HR <- signif(cox_res$coefficients[1,"exp(coef)"],digits=2)
+  HR_lower95 <- signif(cox_res$conf.int[1,"lower .95"],digits=2)
+  HR_upper95 <- signif(cox_res$conf.int[1,"upper .95"],digits=2)
+  HR_str_low_risk <- paste0("HR = ",HR, " (",HR_lower95," - ",HR_upper95,")")
+  
+  km_fit_low_risk <- survfit(sur ~ labs, data = low_risk)
+  p_val_low_risk <- survminer::surv_pvalue(km_fit_low_risk,data=low_risk)$pval
+  formatted_p_low_risk <- sprintf("%.5g", p_val_low_risk)  
+  formatted_p_low_risk <- paste0("P = ", formatted_p_low_risk)
+  
+  ### counts of patients
+  high_risk_counts <- table(high_risk$labs)
+  high_risk_che_count <- high_risk_counts["Chemotherapy"][[1]]
+  high_risk_nonche_count <- high_risk_counts["Non-Chemotherapy"][[1]]
+  
+  low_risk_counts <- table(low_risk$labs)
+  low_risk_che_count <- low_risk_counts["Chemotherapy"]
+  low_risk_nonche_count <- low_risk_counts["Non-Chemotherapy"]
+  
+  if (model_name=="sur_dfs") {
+    ylabel = "DFS"
+  } else if(model_name=="sur_os"){
+    ylabel = "OS"
+  }
+  
+  p1 <- ggsurvplot(km_fit_high_risk, 
+           data = high_risk,
+           pval = FALSE,     
+           risk.table = FALSE,    # 添加风险表
+           conf.int = FALSE,      # 显示置信区间
+           palette = c("#E41A1C","#377EB8" ), 
+           title = paste0(suffix," (High-risk)"),
+           tables.y.text = FALSE,
+           xlab = "Time (Months)", 
+           ylab = ylabel,
+           legend = c(0.38,0.35),
+           legend.title = "",
+           legend.labs=c(paste0("Non-Chemotherapy (n=", high_risk_nonche_count,")"),
+                         paste0("Chemotherapy (n=", high_risk_che_count, ")"))
+           ) 
+        high_risk_nonche_count,")"), size = 5, hjust = 0) 
+  plot1 <- p1$plot + annotate("text", x = 0, y = 0.15, label = formatted_p_high_risk, size = 5, hjust = 0)
+  plot1 <- plot1 + annotate("text", x = 0, y = 0.05, label = HR_str_high_risk, size = 5, hjust = 0)
+  
+  
+  p2 <- ggsurvplot(km_fit_low_risk, 
+           data = low_risk,
+           pval = FALSE,     
+           risk.table = FALSE,    # 添加风险表
+           conf.int = FALSE,      # 显示置信区间
+           palette = c( "#E41A1C","#377EB8"), 
+           title = paste0(suffix," (Low-risk)"),
+           tables.y.text = FALSE,
+           xlab = "Time (Months)", 
+           ylab = ylabel,
+           legend = c(0.38,0.35),
+           legend.title = "",
+           legend.labs=c(paste0("Non-Chemotherapy (n=", low_risk_nonche_count,")"),
+                         paste0("Chemotherapy (n=", low_risk_che_count, ")")
+                         )
+           )
+  plot2 <- p2$plot + annotate("text", x = 0, y = 0.15, label = formatted_p_low_risk, size = 5, hjust = 0)
+  plot2 <- plot2 + annotate("text", x = 0, y = 0.05, label = HR_str_low_risk, size = 5, hjust = 0)
+  
+  
+  file_name = paste0(dirname, model_name,".",gsub("\\s*\\+\\s*", "_", name),".",suffix, ".chemo_KM_plot.pdf" )
+
+  combined_plot <- plot_grid(plot1, plot2, ncol = 2)
+  
+  ggsave(combined_plot, file=file_name,device="pdf", width=8, height=4)
+  output_file <- paste0(dirname, model_name,".","chemo_KM_results.", suffix, ".tsv")
+  
+  if (!file.exists(output_file)) {
+    write.table(
+      data.frame(
+        model = character(),
+        p_val_high_risk = character(),
+        p_val_low_risk = character()
+      ),
+      file = output_file,
+      sep = "\t",
+      row.names = FALSE,
+      col.names = TRUE,
+      quote = FALSE
+    )
+  }
+  
+  write.table(
+    data.frame(
+      model = name,
+      p_val_high_risk = p_val_high_risk,
+      p_val_low_risk = p_val_low_risk
+    ),
+    file = output_file,
+    sep = "\t",
+    row.names = FALSE,
+    col.names = FALSE,
+    quote = FALSE,
+    append = TRUE
+  )
+}
+
+save(plot_km_fun, file = "chemo_KM_plot.functions.template.Rdata")
+
+############## stage split, map models
+chemo_KM_plot_fuc <- function(model_list, name, model_name,dirname,suffix="") {
+
+  ###### stage 2/3
+  tryCatch({
+    print(name)
+  tab_risk_cox_tmp <- model_list$tab_risk_cox %>%
+    dplyr::filter(`TNM_Stage` %in% c(2,3))
+  plot_km_fun(tab_4_kmplot = tab_risk_cox_tmp, title = paste0(name," Stage-II&III"), model_name = model_name, name=name,dirname=dirname,suffix="Stage II&III")
+  }, error = function(e) {
+    warning(paste("Error in Stage II&III:", e$message))
+  })
+  
+}
+
+save(chemo_KM_plot_fuc, file="chemo_KM_plot.functions.map_models.template.Rdata")
+
+```
+
+###### chemo KM plots
+```{r}
+load(file="prog_model_dfs.Rdata")
+load(file = "chemo_KM_plot.functions.template.Rdata")
+load(file="chemo_KM_plot.functions.map_models.template.Rdata")
+load(file = "chemo_KM_plot.functions.template.Rdata")
+
+suffix="Stage II&III"
+model_name="sur_dfs"
+dirname="03.chemo_KM_plot.pdf/"
+outputfile <- paste0(dirname, model_name,".","chemo_KM_results.", suffix, ".tsv")
+
+if(file.exists(outputfile)) {
+  file.remove(outputfile)
+  cat(outputfile," deleted")
+}
+
+Map(chemo_KM_plot_fuc, prog_model_dfs, names(prog_model_dfs), model_name="sur_dfs", dirname="03.chemo_KM_plot.pdf/")
+
+```
+
+
+###### KM plots functions
+```{r}
+plot_km_fun <- function(tab_4_kmplot, title = "", model_name, name, dirname, suffix){
+  if (!dir.exists(dirname)) {
+    dir.create(dirname, recursive = TRUE)
+  }
+  aa <- tab_4_kmplot %>%
+    dplyr::filter(is.na(tab_4_kmplot[,model_name]) == F) %>%
+    dplyr::filter(is.na(`cox_rs`) == F) %>%
+    dplyr::mutate(labs = factor(ifelse(`cox_rs` <= median(`cox_rs`), "Low Risk", "High Risk"), levels = c("Low Risk", "High Risk"))) %>%
+    dplyr::rename(sur = !!sym(model_name)) 
+  
+  cox_formula <- as.formula("sur ~ labs")
+  cox_model <- coxph(cox_formula, data=aa)
+  cox_res <- summary(cox_model)
+  HR <- cox_res$coefficients[1,"exp(coef)"]
+  HR_lower95 <- cox_res$conf.int[1,"lower .95"]
+  HR_upper95 <- cox_res$conf.int[1,"upper .95"]
+  HR_str <- paste0(HR,"= (",HR_lower95," - ",HR_upper95,")")
+    
+  km_fit <- survfit(sur ~ labs, data = aa)
+  p_val <- survminer::surv_pvalue(km_fit,data=aa)$pval
+  formatted_p <- sprintf("%.5g", p_val)
+  formatted_p <- paste0("P = ", formatted_p)
+
+  risk_counts <- table(aa$labs)
+  low_risk_count <- risk_counts["Low Risk"]
+  high_risk_count <- risk_counts["High Risk"]
+  
+  if (model_name=="sur_dfs") {
+    ylabel = "DFS"
+  } else if(model_name=="sur_os"){
+    ylabel = "OS"
+  }
+  
+  p1 <- ggsurvplot(km_fit, 
+           data = aa,
+           pval = FALSE,     
+           risk.table = TRUE,    # 添加风险表
+           conf.int = FALSE,      # 显示置信区间
+           palette = c("#377EB8", "#E41A1C"), 
+           title = title,
+           tables.y.text = FALSE,
+           xlab = "Time (Months)", 
+           ylab = ylabel,
+           ggtheme = theme_classic() + theme(
+             plot.title = element_text(size=8)
+           ),
+           legend = c(0.38,0.35),
+           legend.title = "",
+           legend.labs=c(paste0("Low-risk (n = ",low_risk_count, ")"),
+                         paste0("High-risk (n=", high_risk_count,")"))
+           ) 
+
+  plot <- p1$plot + annotate("text", x = 0, y = 0.1, label = formatted_p, size = 5, hjust = 0)
+  
+  return(list(plot=plot, p_val=p_val, risk_group=aa))
+}
+
+save(plot_km_fun, file = "KM_plot.functions.template.Rdata")
+
+### all patients
+KM_plot_fuc_stage_all <- function(model_list, name, model_name,dirname,suffix) {
+  print(name)
+  tryCatch({
+    tab_risk_cox_tmp <- model_list$tab_risk_cox
+    
+    result <- plot_km_fun(tab_4_kmplot = tab_risk_cox_tmp, title = paste0(name," ",suffix), model_name = model_name, name=name,dirname=dirname,suffix=suffix)
+    
+    ### high-low risk sample groups
+    high_risk_group <- result$risk_group %>%
+      filter(labs=="High Risk")
+    high_risk_group_samples <- paste(high_risk_group$Sample, collapse=",")
+    low_risk_group <- result$risk_group %>%
+      filter(labs=="Low Risk")
+    low_risk_group_samples <- paste(low_risk_group$Sample, collapse=",")
+  
+    file_name = paste0(dirname,model_name,".",gsub("\\s*\\+\\s*", "_", name),".",suffix, ".KM_plot.pdf" )
+    ggsave(result$plot, file=file_name,device="pdf", width=4, height=4)
+    
+    output_file <- paste0(dirname, model_name,".","KM_results.", suffix, ".tsv")
+    if (!file.exists(output_file)) {
+      write.table(
+        data.frame(
+          model = character(),
+          p_val = character(),
+          high_risk_samples = character(),
+          low_risk_samples = character()
+        ),
+        file = output_file,
+        sep = "\t",
+        row.names = FALSE,
+        col.names = TRUE,
+        quote = FALSE
+      )
+    }
+    
+    write.table(
+      data.frame(
+        model = name,
+        p_val = result$p_val,
+        high_risk_samples = high_risk_group_samples,
+        low_risk_samples = low_risk_group_samples
+      ),
+      file = output_file,sep = "\t",row.names = FALSE,col.names = FALSE,quote = FALSE,append = TRUE)
+    
+  }, error = function(e) {
+    warning(paste("Error:", e$message))
+  })
+}
+
+### stages
+KM_plot_fuc_stage_split <- function(model_list, name, model_name,dirname,suffix="") {
+  print(name)
+  output_df <- data.frame()
+  ###### stage 1
+  tryCatch({
+  tab_risk_cox_tmp <- model_list$tab_risk_cox %>%
+    dplyr::filter(`TNM_Stage` %in% c(0/3))
+  result1 <- plot_km_fun(tab_4_kmplot = tab_risk_cox_tmp, title = paste0(name," Stage-I"), model_name = model_name, name=name,dirname=dirname,suffix="Stage-I")
+  output_df[name, "Stage-I_KM_pvalue"] = result1$p_val
+  }, error = function(e) {
+    warning(paste("Error in Stage-I:", e$message))
+  })
+  
+  ###### stage 2
+  tryCatch({
+  tab_risk_cox_tmp <- model_list$tab_risk_cox %>%
+    dplyr::filter(`TNM_Stage` %in% c(1/3))
+  result2 <- plot_km_fun(tab_4_kmplot = tab_risk_cox_tmp, title = paste0(name," Stage-II"), model_name = model_name, name=name,dirname=dirname,suffix="Stage-II")
+  output_df[name, "Stage-II_KM_pvalue"] = result2$p_val
+  }, error = function(e) {
+    warning(paste("Error in Stage-II:", e$message))
+  })
+  
+  ###### stage 3
+  tryCatch({
+  tab_risk_cox_tmp <- model_list$tab_risk_cox %>%
+    dplyr::filter(`TNM_Stage` %in% c(2/3))
+  result3 <- plot_km_fun(tab_4_kmplot = tab_risk_cox_tmp, title = paste0(name," Stage-III"), model_name = model_name, name=name,dirname=dirname,suffix="Stage-III")
+  output_df[name, "Stage-III_KM_pvalue"] = result3$p_val
+  }, error = function(e) {
+    warning(paste("Error in Stage-III:", e$message))
+  })
+  
+  ###### stage 4
+  tryCatch({
+  tab_risk_cox_tmp <- model_list$tab_risk_cox %>%
+    dplyr::filter(`TNM_Stage` %in% c(3/3))
+  result4 <- plot_km_fun(tab_4_kmplot = tab_risk_cox_tmp, title = paste0(name," Stage-IV"), model_name = model_name, name=name, dirname=dirname,suffix="Stage-IV")
+  output_df[name, "Stage-IV_KM_pvalue"] = result4$p_val
+  }, error = function(e) {
+    warning(paste("Error in Stage-IV:", e$message))
+  })
+  
+  tryCatch({
+    ### combine plots
+    file_name = paste0(dirname,model_name,".",gsub("\\s*\\+\\s*", "_", name),".split_stage.KM_plot.pdf" )
+    combined_plot <- plot_grid(result1$plot, result2$plot,result3$plot, result4$plot, ncol = 4)
+    ggsave(combined_plot, file=file_name,device="pdf", width=16, height=4)
+    
+    output_file <- paste0(dirname, model_name,".","KM_results.split_stage.tsv")
+    if (!file.exists(output_file)) {
+      write.table(
+        data.frame(
+          model = character(),
+          "Stage-I_KM_pvalue" = character(),
+          "Stage-II_KM_pvalue" = character(),
+          "Stage-III_KM_pvalue" = character(),
+          "Stage-IV_KM_pvalue" = character()
+        ),
+        file = output_file, sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
+    }
+    
+    write.table(output_df, file = output_file, sep = "\t", row.names = TRUE, col.names = FALSE, quote = FALSE, append = TRUE)
+  }, error = function(e) {
+    warning(paste("Error in output_df:", e$message))
+  })
+}
+
+## stage 2&3
+KM_plot_fuc_stage_23 <- function(model_list, name, model_name,dirname,suffix="") {
+
+  output_df <- data.frame()
+  
+  ###### stage 2&3
+  tryCatch({
+  tab_risk_cox_tmp <- model_list$tab_risk_cox %>%
+    dplyr::filter(`TNM_Stage` %in% c(2, 3))
+  result3 <- plot_km_fun(tab_4_kmplot = tab_risk_cox_tmp, title = paste0(name," Stage-II&III"), model_name = model_name, name=name,dirname=dirname,suffix="Stage-II&III")
+  output_df[name, "Stage-II&III_KM_pvalue"] = result3$p_val
+  risk_group <- result3$risk_group
+  }, error = function(e) {
+    warning(paste("Error in Stage-II&III:", e$message))
+  })
+  
+  tryCatch({
+    ### combine plots
+    file_name = paste0(dirname, model_name,".",gsub("\\s*\\+\\s*", "_", name),".split_stage.KM_plot.pdf" )
+    combined_plot <- plot_grid(result3$plot, ncol = 1)
+    ggsave(combined_plot, file=file_name,device="pdf", width=8, height=8)
+    
+    output_file <- paste0(dirname, model_name,".","KM_results.II&III.tsv")
+    output_risk_file <- paste0(dirname, model_name,".",gsub("\\s*\\+\\s*", "_", name),".risk_group.II&III.tsv")
+    if (!file.exists(output_file)) {
+      write.table(
+        data.frame(
+          model = character(),
+          "Stage-II&III_KM_pvalue" = character()
+        ),
+        file = output_file, sep = "\t", row.names = FALSE, col.names = TRUE, quote = FALSE)
+    }
+    
+    write.table(output_df, file = output_file, sep = "\t", row.names = TRUE, col.names = FALSE, quote = FALSE, append = TRUE)
+    write.table(risk_group, file = output_risk_file, sep = "\t", row.names = TRUE, col.names = FALSE, quote = FALSE)
+  }, error = function(e) {
+    warning(paste("Error in output_df:", e$message))
+  })
+}
+
+save(KM_plot_fuc_stage_all, KM_plot_fuc_stage_split, KM_plot_fuc_stage_23, file = "KM_plot.functions.map_models.template.Rdata")
+
+```
+
+
+###### KM plots
+```{r}
+load(file="prog_model_dfs.Rdata")
+load(file="prog_model_os.Rdata")
+load(file = "KM_plot.functions.template.Rdata")
+load(file = "KM_plot.functions.map_models.template.Rdata")
+
+### all stages
+model_name="sur_dfs"
+dirname="KM_plot.pdf/"
+suffix="Stage-ALL"
+output_file_dfs <- paste0(dirname, model_name,".","KM_results.", suffix, ".tsv")
+
+if(file.exists(output_file_dfs)) {
+  file.remove(output_file_dfs)
+  cat(output_file_dfs," deleted")
+}
+
+Map(KM_plot_fuc_stage_all, prog_model_dfs, names(prog_model_dfs), model_name="sur_dfs",dirname="KM_plot.pdf/",suffix="Stage-ALL")
+
+model_name="sur_os"
+dirname="KM_plot.pdf/"
+suffix="Stage-ALL"
+output_file_os <- paste0(dirname, model_name,".","KM_results.", suffix, ".tsv")
+
+if(file.exists(output_file_os)) {
+  file.remove(output_file_os)
+  cat(output_file_os," deleted")
+}
+
+
+Map(KM_plot_fuc_stage_all, prog_model_os, names(prog_model_os), model_name="sur_os",dirname="KM_plot.pdf/",suffix="Stage-ALL")
+
+
+### stages
+model_name="sur_dfs"
+dirname="03.KM_plot.stage_split.pdf/"
+output_file <- paste0(dirname, model_name,".","KM_results.split_stage.tsv")
+if(file.exists(output_file)) {
+  file.remove(output_file)
+  cat(output_file," deleted")
+}
+Map(KM_plot_fuc_stage_split, prog_model_dfs, names(prog_model_dfs), model_name="sur_dfs",dirname="03.KM_plot.stage_split.pdf/")
+
+model_name="sur_os"
+dirname="03.KM_plot.stage_split.pdf/"
+output_file <- paste0(dirname, model_name,".","KM_results.split_stage.tsv")
+if(file.exists(output_file)) {
+  file.remove(output_file)
+  cat(output_file," deleted")
+}
+Map(KM_plot_fuc_stage_split, prog_model_os, names(prog_model_os), model_name="sur_os",dirname="03.KM_plot.stage_split.pdf/")
+
+```
+
+
+
+
+
+
+
+##### C-index plots
+###### input
+```{r}
+load(file="prog_model_dfs.Rdata")
+load(file="prog_model_os.Rdata")
+
+cindex_28_1000res_dfs <- read.table("cindex_dfs_20251030.tsv",header = T, sep="\t")
+cindex_28_1000res_dfs <- data.frame(cindex_28_1000res_dfs)
+
+cindex_28_1000res_os <- read.table("cindex_os_20251030.tsv",header = T, sep="\t")
+cindex_28_1000res_os <- data.frame(cindex_28_1000res_os)
+
+################# label names
+replacement_rules <- c(
+  "Phosphorylation" = "PHOS",
+  "Genomical" = "GEN",
+  "Methylation" = "MET",
+  "Protein" = "PRO",
+  "Clinical" = "CLI",
+  "Expression" = "RNA",
+  "+" = " + "
+)
+
+replace_colnames <- function(col_names) {
+  for (old in names(replacement_rules)) {
+    new <- replacement_rules[old]
+    col_names <- gsub(old, new, col_names, fixed = TRUE)
+  }
+  return(col_names)
+}
+
+############### DFS
+mean_cindex_dfs <- sapply(unique(cindex_28_1000res_dfs$model), function(i){
+  mean(cindex_28_1000res_dfs[cindex_28_1000res_dfs$model == i, "cindex"],na.rm=TRUE)
+  })
+names(mean_cindex_dfs) <- unique(cindex_28_1000res_dfs$model)
+mean_cindex_dfs <- sort(mean_cindex_dfs)
+
+cindex_28_1000res_dfs$model <- replace_colnames(cindex_28_1000res_dfs$model)
+names(mean_cindex_dfs) <- replace_colnames(names(mean_cindex_dfs))
+
+
+######## OS
+
+mean_cindex_os <- sapply(unique(cindex_28_1000res_os$model), function(i){
+  mean(cindex_28_1000res_os[cindex_28_1000res_os$model == i, "cindex"],na.rm=TRUE)
+  })
+names(mean_cindex_os) <- unique(cindex_28_1000res_os$model)
+mean_cindex_os <- sort(mean_cindex_os)
+
+cindex_28_1000res_os$model <- replace_colnames(cindex_28_1000res_os$model)
+names(mean_cindex_os) <- replace_colnames(names(mean_cindex_os))
+
+
+cindex_28_1000res_dfs <- cindex_28_1000res_dfs %>% 
+  dplyr::mutate(model = factor(model, levels = names(mean_cindex_dfs)))
+
+cindex_28_1000res_os <- cindex_28_1000res_os %>% 
+  dplyr::mutate(model = factor(model, levels = names(mean_cindex_os)))
+
+
+################# factors names
+replacement_rules <- c(
+  "FBXW7" = "FBXW7 Mutation",
+  "TCF7L2" = "TCF7L2 Mutation",
+  "ARID1A" = "ARID1A Mutation",
+  "exp" = "RNA",
+  "pro" = "Protein",
+  "hypo" = "Hypomethylation",
+  "hyper" = "Hypermethylation",
+  "Del" = "Focal CNV Deletion",
+  "sv" = "SV hotspot",
+  "_" = " "
+)
+
+replace_colnames <- function(col_names) {
+  for (old in names(replacement_rules)) {
+    new <- replacement_rules[old]
+    col_names <- gsub(old, new, col_names, fixed = TRUE)
+  }
+  return(col_names)
+}
+
+cindex_28_1000res_dfs$factors <- replace_colnames(cindex_28_1000res_dfs$factors)
+cindex_28_1000res_os$factors <- replace_colnames(cindex_28_1000res_os$factors)
+
+
+save(cindex_28_1000res_dfs, mean_cindex_dfs, file="cindex_28_1000res_dfs.input.Rdata")
+save(cindex_28_1000res_os, mean_cindex_os,file="cindex_28_1000res_os.input.Rdata")
+
+
+## all stage KM pvalues
+os_KM_pvalue_df <- read.table("sur_os.KM_results.Stage-ALL.tsv",header = T, sep="\t",col.names = c("model","os_KM_pvalue","high_risk_samples","low_risk_samples"))
+os_KM_pvalue_df <-  os_KM_pvalue_df %>% select(-high_risk_samples,-low_risk_samples)
+dfs_KM_pvalue_df <- read.table("sur_dfs.KM_results.Stage-ALL.tsv",header = T, sep="\t",col.names = c("model","dfs_KM_pvalue","high_risk_samples","low_risk_samples"))
+dfs_KM_pvalue_df <-  dfs_KM_pvalue_df %>% select(-high_risk_samples,-low_risk_samples)
+
+## split stage KM pvalues
+os_split_KM_pvalue_df <- read.table("sur_os.KM_results.split_stage.tsv",header = T, sep="\t",check.names = F, col.names = c("model","os_Stage_I_KM_pvalue","os_Stage_II_KM_pvalue","os_Stage_III_KM_pvalue","os_Stage_IV_KM_pvalue"))
+dfs_split_KM_pvalue_df <- read.table("sur_dfs.KM_results.split_stage.tsv",header = T, sep="\t",check.names = F, col.names = c("model","dfs_Stage_I_KM_pvalue","dfs_Stage_II_KM_pvalue","dfs_Stage_III_KM_pvalue","dfs_Stage_IV_KM_pvalue"))
+
+## merge
+combine_input_os <- merge(os_KM_pvalue_df,os_split_KM_pvalue_df,by="model",all=T) 
+combine_input_dfs <- merge(dfs_KM_pvalue_df,dfs_split_KM_pvalue_df,by="model",all=T)
+
+combine_input_dfs <- data.frame(t(combine_input_dfs),check.names=F)
+combine_input_os <- data.frame(t(combine_input_os),check.names=F)
+
+colnames(combine_input_dfs) <- combine_input_dfs[1,]
+colnames(combine_input_os) <- combine_input_os[1,]
+
+combine_input_dfs <- combine_input_dfs[-1,]
+combine_input_os <- combine_input_os[-1,]
+
+
+
+#########################################
+## dfs formatting
+df_log <- as.data.frame(
+    lapply(combine_input_dfs, function(x) {
+      suppressWarnings(as.numeric(as.character(x)))
+    }),
+    stringsAsFactors = FALSE,
+    drop=FALSE,
+    check.names=FALSE
+  )
+df_log <- -log10(df_log)
+rownames(df_log) <- rownames(combine_input_dfs)
+combine_input_dfs<- df_log 
+
+## os formatting
+df_log <- as.data.frame(
+    lapply(combine_input_os, function(x) {
+      suppressWarnings(as.numeric(as.character(x)))
+    }),
+    stringsAsFactors = FALSE,
+    drop=FALSE,
+    check.names=FALSE
+  )
+df_log <- -log10(df_log)
+rownames(df_log) <- rownames(combine_input_os)
+combine_input_os<- df_log 
+
+### replace colnames
+replacement_rules <- c(
+  "Phosphorylation" = "PHOS",
+  "Genomical" = "GEN",
+  "Methylation" = "MET",
+  "Protein" = "PRO",
+  "Clinical" = "CLI",
+  "Expression" = "RNA"
+)
+
+replace_colnames <- function(col_names) {
+  for (old in names(replacement_rules)) {
+    new <- replacement_rules[old]
+    col_names <- gsub(old, new, col_names)
+  }
+  return(col_names)
+}
+
+colnames(combine_input_dfs) <- replace_colnames(colnames(combine_input_dfs))
+colnames(combine_input_os) <- replace_colnames(colnames(combine_input_os))
+
+
+save(cindex_28_1000res_dfs, cindex_28_1000res_os, combine_input_dfs, combine_input_os, mean_cindex_dfs, mean_cindex_os, file="00.plot_input.Rdata")
+
+```
+
+###### combine output
+```{r}
+load(file="dfs.all_combn.lasso.RData")
+load(file="os.all_combn.lasso.RData")
+load(file="00.plot_input.Rdata")
+
+
+################# label names
+replacement_rules <- c(
+  "Phosphorylation" = "PHOS",
+  "Genomical" = "GEN",
+  "Methylation" = "MET",
+  "Protein" = "PRO",
+  "Clinical" = "CLI",
+  "Expression" = "RNA"
+)
+
+replace_colnames <- function(col_names) {
+  for (old in names(replacement_rules)) {
+    new <- replacement_rules[old]
+    col_names <- gsub(old, new, col_names)
+  }
+  return(col_names)
+}
+
+replacement_rules_factor <- c(
+  "FBXW7" = "FBXW7 Mutation",
+  "TCF7L2" = "TCF7L2 Mutation",
+  "ARID1A" = "ARID1A Mutation",
+  "exp" = "RNA",
+  "pro" = "Protein",
+  "hypo" = "Hypomethylation",
+  "hyper" = "Hypermethylation",
+  "Del" = "Focal CNV Deletion",
+  "sv" = "SV hotspot",
+  "_" = " "
+)
+
+replace_colnames_factor <- function(col_names) {
+  for (old in names(replacement_rules_factor)) {
+    new <- replacement_rules_factor[old]
+    col_names <- gsub(old, new, col_names)
+  }
+  return(col_names)
+}
+###### DFS
+## KM p values
+combine_input_dfs_t <- data.frame(t(combine_input_dfs),check.names=F)
+combine_input_dfs_t$model <- rownames(combine_input_dfs_t)
+
+## features
+dfs_lasso_results_df <- data.frame(
+  model = names(dfs_lasso_results_list),
+  factors = sapply(dfs_lasso_results_list, function(x) paste(x, collapse = ",")),
+  stringsAsFactors = FALSE
+)
+dfs_lasso_results_df$model <- replace_colnames(dfs_lasso_results_df$model)
+dfs_lasso_results_df$factors <- replace_colnames_factor(dfs_lasso_results_df$factors)
+
+mean_cindex_dfs_df <- data.frame(
+  model = names(mean_cindex_dfs),
+  mean_cindex_dfs = as.numeric(mean_cindex_dfs)
+)
+
+dfs_lasso_results_df_out <- merge(dfs_lasso_results_df, mean_cindex_dfs_df, by = "model", all.x = TRUE)
+
+features_dfs_out <- merge(dfs_lasso_results_df_out, combine_input_dfs_t, by="model")
+
+write.table(features_dfs_out, "DFS.features_KM.tsv", sep="\t", quote=F, row.names=F)
+
+
+###### OS
+## KM p values
+combine_input_os_t <- data.frame(t(combine_input_os),check.names=F)
+combine_input_os_t$model <- rownames(combine_input_os_t)
+
+## features
+os_lasso_results_df <- data.frame(
+  model = names(os_lasso_results_list),
+  factors = sapply(os_lasso_results_list, function(x) paste(x, collapse = ",")),
+  stringsAsFactors = FALSE
+)
+os_lasso_results_df$model <- replace_colnames(os_lasso_results_df$model)
+os_lasso_results_df$factors <- replace_colnames_factor(os_lasso_results_df$factors)
+
+mean_cindex_os_df <- data.frame(
+  model = names(mean_cindex_os),
+  mean_cindex_os = as.numeric(mean_cindex_os)
+)
+
+os_lasso_results_df_out <- merge(os_lasso_results_df, mean_cindex_os_df, by = "model", all.x = TRUE)
+
+features_os_out <- merge(os_lasso_results_df_out, combine_input_os_t, by="model")
+
+write.table(features_os_out, "OS.features_KM.tsv", sep="\t", quote=F, row.names=F)
+
+```
+
+###### plot dfs
+```{r}
+load(file="00.plot_input.Rdata")
+
+### dfs plots
+p_compare_dfs <- cindex_28_1000res_dfs %>% 
+  ggviolin(x = "model",  y = "cindex", fill = "model",color="white",
+            # palette = c(color_vec, "Intergation" = "#000000"),
+            xlab = F , ylab = "C-Index", outlier.size = 1, 
+           width = 0.8, size = 0.2,alpha=0.3
+            )+ 
+  geom_boxplot(width=0.2, color="black", alpha=1, fill = "white", lwd=0.2, outlier.shape = NA)+ 
+  geom_hline(yintercept = 0.7,linetype="dashed",size=0.2,color="grey") + 
+  rotate_x_text(90)+
+  scale_y_continuous(breaks=c(0.5, 0.7, 0.9))+
+  labs(title = "DFS Multivariate Cox Models Performance")+
+  theme(legend.position = "right", 
+        plot.title = element_text(hjust = 0.5, size = 16, face = "bold", family = "Arial"),
+        axis.title = element_text(size = 12, family = "Arial"),
+        axis.text = element_text(size = 10, family = "Arial"),
+        axis.line=element_line(linewidth =0.2),
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank())+
+  # scale_fill_npg() +  
+  # scale_fill_brewer(palette = "Paired") +
+  # scale_fill_igv() + 
+  guides(fill = FALSE, color=FALSE)
+
+p_compare_dfs
+
+### dfs heatmap
+
+ht_input_dfs <- combine_input_dfs[rownames(combine_input_dfs) %in% c("dfs_Stage_I_KM_pvalue","dfs_Stage_II_KM_pvalue","dfs_Stage_III_KM_pvalue","dfs_Stage_IV_KM_pvalue"),]
+rownames(ht_input_dfs) <- c("Stage I","Stage II","Stage III","Stage IV")
+
+
+ht_input_dfs_out <- data.frame(t(ht_input_dfs),check.names=F)
+write.table(ht_input_dfs_out, "03.KM_pvalues.DFS.tsv", row.names = T, quote=F,sep="\t")
+
+
+add_stars <- function(p) {
+  if (is.na(p)) return(0)
+  
+  p_val_threshold <- -log10(0.05)  
+
+  n_stars <- 0
+  if (p > p_val_threshold) n_stars <- 1
+  if (p > 2)             n_stars <- 2
+  if (p > 3)             n_stars <- 3
+  if (p > 4)             n_stars <- 4
+  
+  return(n_stars) 
+}
+
+### add stars### add stars
+star_matrix_dfs <- matrix(nrow = nrow(ht_input_dfs), ncol = ncol(ht_input_dfs))
+for (i in 1:nrow(ht_input_dfs)) {
+  for (j in 1:ncol(ht_input_dfs)) {
+    star_matrix_dfs[i, j] <- add_stars(ht_input_dfs[i, j])
+  }
+}
+rownames(star_matrix_dfs) <- rownames(ht_input_dfs)
+colnames(star_matrix_dfs) <- colnames(ht_input_dfs)
+### color palette
+my_palette = colorRampPalette(c("white","#D73120"))(100)
+n_rows <- nrow(ht_input_dfs)
+
+### heatmap
+heatmap_dfs <- Heatmap(ht_input_dfs, 
+                   col = my_palette, 
+                   cluster_columns = FALSE, 
+                   cluster_rows = FALSE,
+                   column_order = names(mean_cindex_dfs),
+                   cell_fun = function(j, i, x, y, width, height, fill) {
+                      n_stars = star_matrix_dfs[i, j]
+                      if (n_stars > 0) {
+                        star_pacing <- 0.15
+                        star_size <- 0.8
+                        total_stack_len <- (n_stars - 1) * star_pacing * height
+                        start_y <- y - total_stack_len/2
+                        for (k in 1:n_stars) {
+                          star_y <- start_y + (k - 1) * star_pacing * height
+                          grid.text("*", x=x, y=star_y,
+                                    gp = gpar(fontsize=8*star_size,
+                                              col = "black"))
+                        }
+                      }
+                   },
+                   na_col = "grey95",
+                   heatmap_legend_param = list(title = "-log10(p)"),
+                   row_names_gp = gpar(fontsize = 8),  
+                    column_names_gp = gpar(fontsize = 6), 
+                    height = unit(2.5, "cm") )
+
+ht_grob <- grid.grabExpr(draw(heatmap_dfs, heatmap_legend_side = "right"))
+blank_plot <- ggplot() + theme_void() 
+
+final_plot <- grid.arrange(
+  arrangeGrob(p_compare_dfs, blank_plot, ncol = 2, widths = c(85, 15)),
+  # arrangeGrob(p_bar, blank_plot,ncol = 2, widths=c(96,4)),
+  arrangeGrob(blank_plot, ht_grob,  ncol = 2, widths = c(6, 94)),
+  nrow = 2,
+  heights = c(2,8) 
+)
+
+final_ggplot <- as_ggplot(final_plot)  
+final_ggplot
+ggsave("dfs.lambda_min.c_index_htmap.pdf", final_ggplot, width = 8, height = 7,limitsize = FALSE)
+
+
+```
+
+
+###### plot os
+```{r}
+load(file="00.plot_input.Rdata")
+
+### os plots
+p_compare_os <- cindex_28_1000res_os %>% 
+  ggviolin(x = "model",  y = "cindex", fill = "model",color="white",
+            # palette = c(color_vec, "Intergation" = "#000000"),
+            xlab = F , ylab = "C-Index", outlier.size = 1, width = 0.8, 
+            size = 0.2,alpha=0.3
+            )+ 
+  geom_boxplot(width=0.3, color="black", alpha=1, fill = "white", lwd=0.2, outlier.shape = NA)+ 
+  geom_hline(yintercept = 0.7,linetype="dashed",size=0.2,color="grey") + 
+  rotate_x_text(90)+
+  scale_y_continuous(breaks=c(0.5, 0.7, 0.9))+
+  # labs(title = "OS Multivariate Cox Models Performance")+
+  labs(title = "")+
+  # ylim(0.55,0.9)+
+  theme(legend.position = "right", 
+        plot.title = element_text(hjust = 0.5, size = 10, face = "bold", family = "Arial"),
+        axis.title = element_text(size = 8, family = "Arial"),
+        axis.text = element_text(size = 6, family = "Arial"),
+        axis.ticks.x = element_blank(),
+        # axis.text.x = element_blank(),
+        axis.line=element_line(linewidth =0.2)
+        )+
+  guides(fill = FALSE)
+p_compare_os
+
+### os heatmap
+## input
+# ht_input_os <- combine_input_os[-1,]
+## input
+ht_input_os <- combine_input_os[rownames(combine_input_os) %in% c("os_Stage_I_KM_pvalue","os_Stage_II_KM_pvalue","os_Stage_III_KM_pvalue","os_Stage_IV_KM_pvalue"),]
+rownames(ht_input_os) <- c("Stage I","Stage II","Stage III","Stage IV")
+
+
+ht_input_os_out <- data.frame(t(ht_input_os),check.names=F)
+write.table(ht_input_os_out, "03.KM_pvalues.OS.tsv", row.names = T, quote=F,sep="\t")
+
+
+### add stars function
+add_stars <- function(p) {
+  if (is.na(p)) return("")  
+  if (p > 4) return("*\n*\n*\n*")
+  if (p > 3) return("*\n*\n*")
+  if (p > 2) return("*\n*")
+  if (p > -log10(0.05)) return("*")
+  return("")  
+}
+
+### add stars### add stars
+star_matrix_os <- matrix(nrow = nrow(ht_input_os), ncol = ncol(ht_input_os))
+for (i in 1:nrow(ht_input_os)) {
+  for (j in 1:ncol(ht_input_os)) {
+    star_matrix_os[i, j] <- add_stars(ht_input_os[i, j])
+  }
+}
+rownames(star_matrix_os) <- rownames(ht_input_os)
+colnames(star_matrix_os) <- colnames(ht_input_os)
+### color palette
+my_palette = colorRampPalette(c("white","#D73120"))(100)
+n_rows <- nrow(ht_input_os)
+
+
+### heatmap
+heatmap_os <- Heatmap(ht_input_os, 
+                   col = my_palette, 
+                   cluster_columns = FALSE, 
+                   cluster_rows = FALSE,
+                   column_order = names(mean_cindex_os),
+                   cell_fun = function(j, i, x, y, width, height, fill) {
+                      stars <- star_matrix_os[i, j]
+                      if (stars != "") {
+                        grid.text(stars, x = x, y = y, gp = gpar(fontsize = 4, col = "black"))
+                      }
+                    },
+                   heatmap_legend_param = list(title = "-log10(p)",
+                                               grid_height=unit(1, "cm"),
+                                               title_gp = gpar(fontsize=8),
+                                               labels_gp = gpar(fontsize=8)
+                                               ),
+                   row_names_gp = gpar(fontsize = 6), 
+                    column_names_gp = gpar(fontsize = 4),  
+                    height = unit(n_rows * 0.8, "cm") )
+
+ht_grob <- grid.grabExpr(draw(heatmap_os, heatmap_legend_side = "right"))
+blank_plot <- ggplot() + theme_void() 
+
+final_plot <- grid.arrange(
+  arrangeGrob(p_compare_os, blank_plot, ncol = 2, widths = c(75, 25)),
+  arrangeGrob(blank_plot, ht_grob,  ncol = 2, widths = c(12, 88)),
+  nrow = 2,
+  heights = c(2,7) 
+)
+
+final_ggplot <- as_ggplot(final_plot)  
+final_ggplot
+ggsave("os.lambda_min.c_index_htmap.pdf", final_ggplot, width = 4, height = 6,limitsize = FALSE)
+
+```
+
+
+
+
