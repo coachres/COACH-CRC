@@ -155,96 +155,96 @@ linear.regression_phos = function(Y,X,gene_list,formula,Omics_name,outliers_list
 
 ## RNA expression
 print("RNA")
-RNA_expression = read.table("./01.input/Tumor_FPKM.matrix.tsv",sep = "\t",header = T,check.names = F)
+RNA_expression = read.table("Tumor_FPKM.matrix.tsv",sep = "\t",header = T,check.names = F)
 RNA_expression = RNA_expression[!is.na(RNA_expression$Sample),]
 RNA_expression <- mutate_at(RNA_expression, colnames(RNA_expression), ~replace(., is.na(.), 0))
 
-sv_hotspots = read.table("./01.input/SV_hotspots.matrix.tsv",sep = "\t",header = T,check.names = F)
+sv_hotspots = read.table("SV_hotspots.matrix.tsv",sep = "\t",header = T,check.names = F)
 
 # ## select samples
 sv_hotspots = sv_hotspots[sv_hotspots$Sample %in% RNA_expression$Sample,]
 RNA_expression = RNA_expression[RNA_expression$Sample %in% sv_hotspots$Sample,]
 
 # ## gene list
-gene_lines <- readLines("./01.input/input_RNA.gene.list")
+gene_lines <- readLines("input_RNA.gene.list")
 gene_list <- strsplit(gene_lines, "\n")
 
 ## outliers list
-outliers_lines <- readLines("./01.input/outliers.RNA.gene.list")
+outliers_lines <- readLines("outliers.RNA.gene.list")
 outliers_list <- strsplit(outliers_lines, "\n")
 
 formula_estimate_purity = test_target_Y ~ test_target_X + ESTIMATE_Purity
 # ## linear.regression
 data = linear.regression(RNA_expression,sv_hotspots,gene_list,formula_estimate_purity,"sv_hotspots_RNA",outliers_lines)
-write.table(data, file ="./02.results/sv_hotspots_RNA.result.tsv", quote=FALSE, sep = "\t",row.names = F, col.names = TRUE)
+write.table(data, file ="sv_hotspots_RNA.result.tsv", quote=FALSE, sep = "\t",row.names = F, col.names = TRUE)
 
 ########
 print("protein")
-protein = read.table("./01.input/tumor_protein.tsv", sep = "\t", header = T, check.names = F)
+protein = read.table("tumor_protein.tsv", sep = "\t", header = T, check.names = F)
 protein = protein[!is.na(protein$Sample),]
 
-sv_hotspots = read.table("./01.input/SV_hotspots.matrix.tsv",sep = "\t",header = T,check.names = F)
+sv_hotspots = read.table("SV_hotspots.matrix.tsv",sep = "\t",header = T,check.names = F)
 
 # ## select samples
 sv_hotspots = sv_hotspots[sv_hotspots$Sample %in% protein$Sample,]
 protein = protein[protein$Sample %in% sv_hotspots$Sample,]
 
 # ## gene list
-gene_lines <- readLines("./01.input/input_protein.gene.list")
+gene_lines <- readLines("input_protein.gene.list")
 gene_list <- strsplit(gene_lines, "\n")
 
 ## outliers list
-outliers_lines <- readLines("./01.input/outliers.protein.gene.list")
+outliers_lines <- readLines("outliers.protein.gene.list")
 outliers_list <- strsplit(outliers_lines, "\n")
 formula_estimate_purity = test_target_Y ~ test_target_X + ESTIMATE_Purity
 
 data = linear.regression(protein,sv_hotspots,gene_list,formula_estimate_purity,"sv_hotspots_protein",outliers_list)
-write.table(data, file ="./02.results/sv_hotspots_protein.result.tsv", quote=FALSE, sep = "\t",row.names = F, col.names = TRUE)
+write.table(data, file ="sv_hotspots_protein.result.tsv", quote=FALSE, sep = "\t",row.names = F, col.names = TRUE)
 
 ########
 print("phosphate")
-phosphate = read.table("./01.input/tumor_phosSite.tsv",sep= "\t", header = T, check.names = F)
+phosphate = read.table("tumor_phosSite.tsv",sep= "\t", header = T, check.names = F)
 
-sv_hotspots = read.table("./01.input/SV_hotspots.matrix.tsv",sep = "\t",header = T,check.names = F)
+sv_hotspots = read.table("SV_hotspots.matrix.tsv",sep = "\t",header = T,check.names = F)
 
 # # ## select samples
 sv_hotspots = sv_hotspots[sv_hotspots$Sample %in% phosphate$Sample,]
 phosphate = phosphate[phosphate$Sample %in% sv_hotspots$Sample,]
 
 # ## gene list
-gene_lines <- readLines("./01.input/input_phosphate.gene.list")
+gene_lines <- readLines("input_phosphate.gene.list")
 gene_list <- strsplit(gene_lines, "\n")
 
 ## outliers list
-outliers_lines <- readLines("./01.input/outliers.phosphorylation.gene.list")
+outliers_lines <- readLines("outliers.phosphorylation.gene.list")
 outliers_list <- strsplit(outliers_lines, "\n")
 
 formula_estimate_purity = test_target_Y ~ test_target_X + ESTIMATE_Purity
 data = linear.regression_phos(phosphate,sv_hotspots,gene_list,formula_estimate_purity,"sv_hotspots_phosphate", outliers_list)
-write.table(data, file ="./02.results/sv_hotspots_phosphate_protein.result.tsv", quote=FALSE, sep = "\t",row.names = F, col.names = TRUE)
+write.table(data, file ="sv_hotspots_phosphate_protein.result.tsv", quote=FALSE, sep = "\t",row.names = F, col.names = TRUE)
 
 ########
 ## methyl
 print("methyl")
 
-methyl = read.table("./01.input/04.MANE.all_gene_promoter.methyl.matrix.tsv",sep= "\t", header = T, check.names = F)
+methyl = read.table("methyl.matrix.tsv",sep= "\t", header = T, check.names = F)
 # ## mutation
-sv_hotspots = read.table("./01.input/SV_hotspots.matrix.tsv",sep = "\t",header = T,check.names = F)
+sv_hotspots = read.table("SV_hotspots.matrix.tsv",sep = "\t",header = T,check.names = F)
 
 ## select samples
 sv_hotspots = sv_hotspots[sv_hotspots$Sample %in% methyl$Sample,]
 methyl = methyl[methyl$Sample %in% sv_hotspots$Sample,]
 
 ## gene list
-gene_lines <- readLines("./01.input/input_methyl.gene.list")
+gene_lines <- readLines("input_methyl.gene.list")
 gene_list <- strsplit(gene_lines, "\n")
 
 ## outliers list
-outliers_lines <- readLines("./01.input/outliers.methyl.gene.list")
+outliers_lines <- readLines("outliers.methyl.gene.list")
 outliers_list <- strsplit(outliers_lines, "\n")
 
 ## regression
 formula_estimate_purity = test_target_Y ~ test_target_X + ESTIMATE_Purity 
 data = linear.regression(methyl,sv_hotspots,gene_list,formula_estimate_purity,"sv_hotspots_methyl", outliers_list)
-write.table(data, file ="./02.results/sv_hotspots_methyl_lm_estimate_purity.result.tsv", quote=FALSE, sep = "\t",row.names = F, col.names = TRUE)
+write.table(data, file ="sv_hotspots_methyl_lm_estimate_purity.result.tsv", quote=FALSE, sep = "\t",row.names = F, col.names = TRUE)
 
