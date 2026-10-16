@@ -165,7 +165,6 @@ linear.regression_phos = function(Y,X,gene_list,formula,Omics_name,cnv,outliers_
 ## cnv mutation states
 cnv = read.table("focal_CNV.gene.matrix.tsv",sep = "\t",header = T,check.names = F)
 
-## RNA vs SNV_indel
 # RNA expression
 print("RNA ciseffect")
 RNA_expression = read.table("PKM.matrix.trans.log2_plus1.tsv",sep = "\t",header = T,check.names = F)
@@ -194,7 +193,6 @@ write.table(data, file ="estimate_purity.result.tsv", quote=FALSE, sep = "\t",ro
 
 
 # ########
-# #### Protein vs SNV_indel
 print("protein ciseffect") 
 protein = read.table("protein.trans.log2.tsv", sep = "\t", header = T, check.names = F)
 protein = protein[!is.na(protein$Sample),]
@@ -219,7 +217,6 @@ data = linear.regression(protein,focal_cnv,gene_list,formula_estimate_purity,"pu
 write.table(data, file ="estimate_purity.result.tsv", quote=FALSE, sep = "\t",row.names = F, col.names = TRUE)
 
 ########
-# ## Phospho sites vs SNV_indel
 print("phosphorylation ciseffect")
 phosphate = read.table("phosSite.20230907.trans.log2.tsv",sep= "\t", header = T, check.names = F)
 # # ## SNV indel mutation

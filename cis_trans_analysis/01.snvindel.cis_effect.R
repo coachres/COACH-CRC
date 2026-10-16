@@ -212,9 +212,7 @@ gene_list <- strsplit(gene_lines, "\n")
 outliers_lines <- readLines("outliers.protein.gene.list")
 outliers_list <- strsplit(outliers_lines, "\n")
 
-# formula_estimate_purity = test_target_Y ~ test_target_X + ESTIMATE_Purity + noise
 formula_estimate_purity = test_target_Y ~ test_target_X + ESTIMATE_Purity
-# formula_facets_purity = test_target_Y ~ test_target_X + Purity + noise
 data = linear.regression(protein,non_silent_snvindel,gene_list,formula_estimate_purity,"SNV_protein_protein_estimate_purity",outliers_list)
 write.table(data, file ="SNV_protein_lm_estimate_purity.result.tsv", quote=FALSE, sep = "\t",row.names = F, col.names = TRUE)
 
@@ -240,7 +238,6 @@ gene_list <- strsplit(gene_lines, "\n")
 outliers_lines <- readLines("outliers.phosphorylation.gene.list")
 outliers_list <- strsplit(outliers_lines, "\n")
 
-# formula_estimate_purity = test_target_Y ~ test_target_X + ESTIMATE_Purity + noise
 formula_estimate_purity = test_target_Y ~ test_target_X + ESTIMATE_Purity
 data = linear.regression_phos(phosphate,non_silent_snvindel,gene_list,formula_estimate_purity,"SNV_phosphate_protein_estimate_purity",outliers_list)
 write.table(data, file ="SNV_phosphate_protein_lm_estimate_purity.result.tsv", quote=FALSE, sep = "\t",row.names = F, col.names = TRUE)

@@ -27,6 +27,11 @@ library(extrafont)
 library(scales)
 library(caret)
 library(stringr)
+
+library(ggrepel)
+library(impute)
+
+library(extrafont)
 loadfonts()
 Arial <- Type1Font(family = "Arial",
                    metrics = c("ArialMT.afm",
@@ -38,11 +43,1848 @@ pdfFonts(Arial = Arial)
 ```
 
 
-### input
+
+### INPUT
+#### clinical input
+```{r}
+### clinical
+clin_dat <- as.data.frame(read_tsv(file = "./clinical.txt", col_names = T))
+sur_dat <- as.data.frame(clin_dat) %>% 
+  dplyr::select("Sample", "OS_5year", "Death_5year", "DFS_5year", "Relapse_Death_5year") %>% 
+  dplyr::mutate(`OS_5year` = as.numeric(`OS_5year`),
+                `Death_5year` = as.numeric(`Death_5year`),
+                `DFS_5year` = as.numeric(`DFS_5year`),
+                `Relapse_Death_5year` = as.numeric(`Relapse_Death_5year`)) %>% 
+  dplyr::mutate(sur_os = survival::Surv(`OS_5year`, `Death_5year` == 1),
+                sur_dfs = survival::Surv(`DFS_5year`, `Relapse_Death_5year` == 1)) %>% 
+  dplyr::select("Sample", "sur_os", "sur_dfs")
+rownames(sur_dat) <- sur_dat$Sample
+
+clin_dat <- clin_dat %>% 
+  dplyr::transmute(Sample = Sample,
+                   Gender = ifelse(Gender == "Female", 0, ifelse(Gender == "Male", 1, NA)),
+                   Age = as.numeric(Age),
+                   `TNM_Stage` = as.numeric(factor(`Stage`, levels = c("I", "II", "III", "IV"), labels = c("I", "II", "III", "IV"))),
+                   `Tumor_Left_Colon` = ifelse(`Location_3group` == "Left_colon", 1, 0),
+                   `Tumor_Right_Colon` = ifelse(`Location_3group` == "Right_colon", 1, 0),
+                   `Tumor_Rectum` = ifelse(`Location_3group` == "Rectum", 1, 0),
+                   `CMS1` = ifelse(`Final_CMS` %in% c("CMS1"), 1, 0),
+                   `CMS2` = ifelse(`Final_CMS` %in% c("CMS2"), 1, 0),
+                   `CMS3` = ifelse(`Final_CMS` %in% c("CMS3"), 1, 0),
+                   `CMS4` = ifelse(`Final_CMS` %in% c("CMS4"), 1, 0),
+                   Hypermutation = ifelse(`Hypermutated` %in% c("hyper"), 1, 0),
+                   `MSS` = ifelse(`GenomicSubtype` %in% c("MSS"), 1, 0),
+                   `POLE` = ifelse(`GenomicSubtype` %in% c("POLE"), 1, 0),
+                   `MSI` = ifelse(`GenomicSubtype` %in% c("MSI"), 1, 0),
+                   TMB = as.numeric(TMB),
+                   SVcount = as.numeric(SVcount),
+                   `CIMP_Status` = ifelse(`CIMP_status` %in% c("CIMP"), 1, 0),
+                   `Epimutation_Burden` = as.numeric(`Epimutation_burden`)
+                   )
+
+
+### Stages
+clin_stages <- read.table("./CRC.Stages.txt",sep="\t",header=T,check.names=F)
+clin_stages <- clin_stages %>%
+  mutate(Sample=paste0(Normal,"-VS-",Tumor)
+         )
+
+save(sur_dat, clin_dat, clin_stages, file = "clindata_input.RData")
+
+
+
+```
+
+
+#### methylation input, 0/1 input
+```{r}
+clin_dat <- as.data.frame(read_tsv(file = "./clinical.txt", col_names = T))
+methyl_input <- read.table("./allChr_wilcox_CpG.txt",sep="\t", header=T, check.names=F)
+hyper_promoter_methyl <- read.table("hyper_DMR.wilcox_CpG.matrix.promoter.tsv",sep="\t", header=T, check.names=F)
+hypo_promoter_methyl <- read.table("hypp_DMR.wilcox_CpG.matrix.promoter.tsv",sep="\t", header=T, check.names=F)
+promoter_DMR_gene <- read.table("promoter.DMR.gene.list",sep="\t", header=F, check.names=F)
+colnames(promoter_DMR_gene) <- c("DMR","Gene")
+
+########## all methyl 
+rownames(methyl_input) <- methyl_input$Region
+rownames(methyl_input) <- gsub(":","_",rownames(methyl_input))
+rownames(methyl_input) <- gsub("-","_",rownames(methyl_input))
+methyl_input_t <- data.frame(t(methyl_input[,2:ncol(methyl_input)]),check.names=F)
+methyl_input_t$Sample <- rownames(methyl_input_t)
+
+methyl_sample_match <- as.data.frame(read_tsv(file = "./1005pair.WGS_WGBS.list", col_names = T))
+methyl_sample_match <- merge(clin_dat[,c("Sample","Tumor")],methyl_sample_match,by.x="Tumor",by.y="WGS-Tumor",all.y=T)
+
+methyl_input_match <- merge(methyl_sample_match[,c("Sample","WGBS-Tumor")],methyl_input_t,by.x="WGBS-Tumor",by.y="Sample",all.x=T)
+rownames(methyl_input_match) <- methyl_input_match$Sample
+methyl_input_match <- methyl_input_match[,3:ncol(methyl_input_match)]
+
+#### filter promoter DMR
+hyper_DMR <- gsub(":","_", hyper_promoter_methyl$Region)
+hyper_DMR <- gsub("-","_", hyper_DMR)
+
+hypo_DMR <- gsub(":","_", hypo_promoter_methyl$Region)
+hypo_DMR <- gsub("-","_", hypo_DMR)
+
+hyper_methyl_input_match <- methyl_input_match[,colnames(methyl_input_match) %in% hyper_DMR]
+hyper_methyl_input_match <- hyper_methyl_input_match %>%
+  mutate(across(everything(),
+    ~ case_when( .x==0 ~ 0,
+                 .x==-1 ~ 0,
+                 .x==1 ~ 1,
+                 is.na(.x) ~ 0,
+                 TRUE ~ .x
+  )))
+
+hypo_methyl_input_match <- methyl_input_match[,colnames(methyl_input_match) %in% hypo_DMR]
+
+hypo_methyl_input_match <- hypo_methyl_input_match %>%
+  mutate(across(everything(),
+    ~ case_when( .x==0 ~ 0,
+                 .x==1 ~ 0,
+                 .x==-1 ~ 1,
+                 is.na(.x) ~ 0,
+                 TRUE ~ .x
+  )))
+
+
+colnames(hyper_methyl_input_match) <- str_c(colnames(hyper_methyl_input_match),"_hyper")
+colnames(hypo_methyl_input_match) <- str_c(colnames(hypo_methyl_input_match),"_hypo")
+
+hyper_methyl_input_match$Sample <- rownames(hyper_methyl_input_match)
+hypo_methyl_input_match$Sample <- rownames(hypo_methyl_input_match)
+
+###select and merge promoter DMR
+methylation_df <- merge(hyper_methyl_input_match,hypo_methyl_input_match,by="Sample",all=T)
+rownames(methylation_df) <- methylation_df$Sample
+
+save(methylation_df, promoter_DMR_gene, file = "methylation_mean.binary.RData")
+
+########################### filter genebody DMR
+
+hyper_genebody_methyl <- read.table("hyper_DMR.wilcox_CpG.matrix.genebody.tsv",sep="\t", header=T, check.names=F)
+hypo_genebody_methyl <- read.table("hypp_DMR.wilcox_CpG.matrix.genebody.tsv",sep="\t", header=T, check.names=F)
+genebody_DMR_gene <- read.table("genebody.DMR.gene.list",sep="\t", header=F, check.names=F)
+colnames(genebody_DMR_gene) <- c("DMR","Gene")
+
+
+hyper_DMR_genebody <- gsub(":","_", hyper_genebody_methyl$Region)
+hyper_DMR_genebody <- gsub("-","_", hyper_DMR_genebody)
+
+hypo_DMR_genebody <- gsub(":","_", hypo_genebody_methyl$Region)
+hypo_DMR_genebody <- gsub("-","_", hypo_DMR_genebody)
+
+hyper_methyl_input_match <- methyl_input_match[,colnames(methyl_input_match) %in% hyper_DMR_genebody]
+hyper_methyl_input_match <- hyper_methyl_input_match %>%
+  mutate(across(everything(),
+    ~ case_when( .x==0 ~ 0,
+                 .x==-1 ~ 0,
+                 .x==1 ~ 1,
+                 is.na(.x) ~ 0,
+                 TRUE ~ .x
+  )))
+
+hypo_methyl_input_match <- methyl_input_match[,colnames(methyl_input_match) %in% hypo_DMR_genebody]
+hypo_methyl_input_match <- hypo_methyl_input_match %>%
+  mutate(across(everything(),
+    ~ case_when( .x==0 ~ 0,
+                 .x==1 ~ 0,
+                 .x==-1 ~ 1,
+                 is.na(.x) ~ 0,
+                 TRUE ~ .x
+  )))
+
+colnames(hyper_methyl_input_match) <- str_c(colnames(hyper_methyl_input_match),"_hyper")
+colnames(hypo_methyl_input_match) <- str_c(colnames(hypo_methyl_input_match),"_hypo")
+
+hyper_methyl_input_match$Sample <- rownames(hyper_methyl_input_match)
+hypo_methyl_input_match$Sample <- rownames(hypo_methyl_input_match)
+
+###select and merge genebody DMR
+methylation_df_genebody <- merge(hyper_methyl_input_match,hypo_methyl_input_match,by="Sample",all=T)
+rownames(methylation_df_genebody) <- methylation_df_genebody$Sample
+
+save(methylation_df_genebody, genebody_DMR_gene, file = "methylation_mean.genebody.binary.RData")
+
+
+
+```
+
+
+#### sv hotspots input
+```{r}
+
+############### SV hotspots
+sv_tab <- as.data.frame(read_tsv(file = "./SV_hotspots.matrix.tsv", col_names = T))
+rownames(sv_tab) <- sv_tab$Sample
+sv_tab <- sv_tab %>% dplyr::select(-"Sample")
+
+colnames(sv_tab) <- str_c(colnames(sv_tab), "_sv", sep = "")
+sv_tab <- sv_tab %>% dplyr::mutate(Sample = rownames(sv_tab))
+
+save(sv_tab, file = "sv_hotspot.RData")
+```
+
+#### snv drivers input
+```{r}
+
+############### snvindel
+
+snv_tab <- as.data.frame(read_tsv(file = "./gene_count_nonsilent.tsv", col_names = T))
+rownames(snv_tab) <- snv_tab$Sample
+snv_39_driver <- read.table(file="./driver.gene.list",sep="\t",header=F)
+driver_genes <- as.character(snv_39_driver$V1)
+snv_driver_tab <- snv_tab[, colnames(snv_tab) %in% driver_genes, drop = FALSE]
+snv_driver_tab$Sample <- snv_tab$Sample
+
+save(snv_driver_tab, file = "snv_drivers.RData")
+
+
+```
+
+#### Focal CNV input
+```{r}
+
+focal_cnv_filter_centromere <- read.table("./focal_CNV.tsv",sep="\t",header=F)
+focal_cnv_filter_centromere <- focal_cnv_filter_centromere %>%
+  mutate( status = case_when(
+    V1=="Amplification" ~ "Amp",
+    V1=="Deletion" ~ "Del"
+  ),
+    Focal_CNV_id=paste0(gsub("-","_",gsub(":","_",V3)),"_",V2,"_",status)
+         )
+
+focal_cnv <- read.table(file="focal_cnv.matrix.trans.tsv",sep="\t",header=T)
+focal_cnv <- focal_cnv %>%
+  rename(Sample=ID) 
+
+focal_cnv <- focal_cnv[, (colnames(focal_cnv) %in% focal_cnv_filter_centromere$Focal_CNV_id|colnames(focal_cnv)=="Sample")]
+
+focal_cnv_annotation <- read.table(file="Focal_CNV_id.gene.list",sep="\t",header=F)
+colnames(focal_cnv_annotation) <- c("Focal_CNV_id","Gene")
+
+save(focal_cnv, focal_cnv_annotation, file = "focal_cnv.RData")
+
+```
+
+
+#### RNA input
+```{r}
+
+############## expression
+argo_tumor <- as.data.frame(read_tsv(file = "./Tumor_FPKM.matrix.tsv", col_names = T))
+
+exp_diff <- read.table("./Normal-VS-Tumor.DEseq2.txt",sep="\t",header=T)
+
+exp_dat <- argo_tumor[,5:ncol(argo_tumor)]
+colnames(exp_dat)[1:ncol(exp_dat)] <- str_c(colnames(exp_dat)[1:ncol(exp_dat)], "_exp", sep = "")
+
+colnames(exp_dat) <- str_replace_all(colnames(exp_dat), pattern = "-", replacement = "_")
+colnames(exp_dat) <- str_replace_all(colnames(exp_dat), pattern = ".", replacement = "_")
+
+exp_dat$Sample <- rownames(exp_dat)
+save(exp_dat, exp_diff, file = "RNA_log2_plus1.RData")
+
+
+```
+
+
+#### protein input
+```{r}
+
+################# protein ###
+pro_dat <- as.data.frame(read_tsv(file = "./tumor_protein.txt", col_names = T))
+
+pro_gene_match_tab <- as.data.frame(read_tsv(file = "./proteinName.txt", col_names = T))
+pro_dat <- pro_dat %>% 
+  dplyr::left_join(pro_gene_match_tab[, c("Gene", "Protein")], by = c("protein" = "Protein")) %>% 
+  dplyr::filter(is.na(`Gene`) == F)
+
+pro_diff <- read.table("./protein_significant_wilcox_diff_tumor_normal.txt",sep="\t",header=T)
+
+### MAD filtering 
+############# find proteins with max MAD variation for each gene
+mad_select_tab <- cbind(row_name = rownames(pro_dat),
+                        mad = MatrixGenerics::rowMads(as.matrix(pro_dat[,2:(ncol(pro_dat)-1)])),
+                        pro = pro_dat$protein,
+                        gene = pro_dat$Gene
+                        ) %>% 
+  as.data.frame() %>% 
+  group_by(gene) %>% 
+  dplyr::filter(mad == max(mad)) %>% 
+  ungroup()
+
+pro_dat <- pro_dat[mad_select_tab$row_name, ]
+rownames(pro_dat) <- pro_dat$Gene
+pro_dat <- pro_dat %>% 
+  dplyr::select(-"protein", -"Gene") %>% 
+  t() %>% 
+  as.data.frame()
+pro_dat <- log2(pro_dat + 1)   #########   log2 transformed ###############
+pro_dat <- pro_dat %>% 
+  dplyr::mutate(Sample = rownames(pro_dat))
+rm(pro_gene_match_tab, mad_select_tab) 
+colnames(pro_dat)[1:(ncol(pro_dat)-1)] <- str_c(colnames(pro_dat)[1:(ncol(pro_dat)-1)], "_pro", sep = "")
+colnames(pro_dat) <- str_replace_all(colnames(pro_dat), pattern = "-", replacement = "_")
+
+save(pro_dat, pro_diff, file = "protein.RData")
+
+
+```
+
+#### 435 patients selections
+```{r}
+load(file = "protein.RData")
+load(file = "RNA_log2_plus1.RData")
+load(file = "signature.RData")
+load(file = "sv_hotspot.RData")
+load(file = "methylation_mean.RData")
+load(file = "phos_input.RData")
+load(file = "clindata_input.RData")
+
+patient_id <- Reduce(intersect, list(clin_dat$Sample[is.na(clin_dat$TNM_Stage) == F],
+                                     sur_dat$Sample[is.na(sur_dat$sur_dfs) == F],
+                                     sur_dat$Sample[is.na(sur_dat$sur_os) == F],
+                                     sv_tab$Sample,
+                                     signature_tab$Sample,
+                                     exp_dat$Sample,
+                                     # cnv_tab$Sample,
+                                     methylation_df$Sample,
+                                     pro_dat$Sample
+                                     # snv_dat$Sample
+                                     ))
+
+save(patient_id, file = "435sample_list.RData")
+
+
+```
+
+##### 967 patients selections
+```{r}
+load(file = "protein.RData")
+load(file = "RNA_log2_plus1.RData")
+load(file = "signature.RData")
+load(file = "sv_hotspot.RData")
+load(file = "methylation_mean.RData")
+load(file = "phos_input.RData")
+load(file = "clindata_input.RData")
+
+patient_id <- Reduce(intersect, list(clin_dat$Sample[!is.na(clin_dat$TNM_Stage)],
+                                     sur_dat$Sample[is.na(sur_dat$sur_dfs) == F],
+                                     sur_dat$Sample[is.na(sur_dat$sur_os) == F],
+                                     sv_tab$Sample,
+                                     signature_tab$Sample,
+                                     exp_dat$Sample,
+                                     methylation_df$Sample,
+                                     pro_dat$Sample
+                                     ))
+
+remaining_patient_id <- Reduce(intersect, list(clin_dat$Sample[!is.na(clin_dat$TNM_Stage)],
+                                      clin_dat$Sample[! clin_dat$Sample %in% patient_id],
+                                     sur_dat$Sample[is.na(sur_dat$sur_dfs) == F],
+                                     sur_dat$Sample[is.na(sur_dat$sur_os) == F],
+                                     sv_tab$Sample,
+                                     exp_dat$Sample,
+                                     methylation_df$Sample
+                                     ))
+
+all_patient_id <- Reduce(intersect, list(clin_dat$Sample[!is.na(clin_dat$TNM_Stage)],
+                                     sur_dat$Sample[is.na(sur_dat$sur_dfs) == F],
+                                     sur_dat$Sample[is.na(sur_dat$sur_os) == F],
+                                     sv_tab$Sample,
+                                     exp_dat$Sample,
+                                     methylation_df$Sample
+                                     ))
+
+save(remaining_patient_id, all_patient_id, file = "remaining_sample_list.RData")
+
+
+```
+
+### FUNCTIONS
+#### dfs uni cox function
+```{r}
+dfs_uni_cox <- function(tab_4_dfs_cox, dfs_covariates, cox_results_tsv, cox_results_rdata, model="sur_dfs") {
+ 
+  univ_formulas <- sapply(dfs_covariates, function(x) {
+    as.formula(paste(model," ~", x))
+  })
+  
+  univ_models <- lapply(univ_formulas, function(x) {
+    tryCatch({
+      coxph(x, data = tab_4_dfs_cox)
+    }, error = function(e) {
+      warning(paste("Failed to fit model for", deparse(x), "\nError:", e$message))
+      return(NULL)
+    })
+  })
+  
+  valid_models <- !sapply(univ_models, is.null)
+  univ_models <- univ_models[valid_models]
+  univ_formulas <- univ_formulas[valid_models]
+  
+  univ_results <- lapply(univ_models, function(x) {
+    tryCatch({
+      x_summary <- summary(x)
+      
+      p_value <- signif(x_summary$coefficients[1, 5], digits = 4)
+      wald_test <- signif(x_summary$wald["test"], digits = 4)
+      beta <- signif(x_summary$coefficients[1, 1], digits = 4)  
+      HR <- signif(x_summary$coefficients[1, 2], digits = 4)  
+      HR_conf_lower <- signif(x_summary$conf.int[1, "lower .95"], 4)
+      HR_conf_upper <- signif(x_summary$conf.int[1, "upper .95"], 4)
+      
+      res <- c(
+        beta = beta,
+        HR = HR,
+        HR_lower_95 = HR_conf_lower,
+        HR_upper_95 = HR_conf_upper,
+        wald_test = wald_test,
+        p_value = p_value
+      )
+      
+      return(res)
+    }, error = function(e) {
+      warning(paste("Failed to extract results for model:", deparse(x$call)))
+      return(rep(NA, 6))  
+    })
+  })
+  
+  cox_res <- t(as.data.frame(univ_results, check.names = FALSE))
+  cox_res <- as.data.frame(cox_res)
+  
+  cox_res <- cox_res %>%
+    mutate(factor = as.character(rownames(cox_res)))
+  
+  save(cox_res, univ_models, univ_formulas, dfs_covariates, file = cox_results_rdata)
+  write.table(cox_res, file = cox_results_tsv, quote = FALSE, row.names = FALSE, sep = "\t")
+  
+  return(cox_res)
+}
+save(dfs_uni_cox, file = "dfs_uni.cox.Rdata")
+
+
+```
+#### os uni cox function
+```{r}
+os_uni_cox <- function(tab_4_os_cox, os_covariates, cox_results_tsv, cox_results_rdata,model="sur_os") {
+ 
+  univ_os_formulas <- sapply(os_covariates,function(x) as.formula(paste(model,' ~ ', x)))
+  
+  univ_os_models <- lapply(univ_os_formulas, function(x) {
+    tryCatch({
+      coxph(x, data = tab_4_os_cox)
+    }, error = function(e) {
+      warning(paste("Failed to fit model for", deparse(x), "\nError:", e$message))
+      return(NULL)
+    })
+  })
+  
+  univ_os_models <- univ_os_models[!sapply(univ_os_models, is.null)]
+  univ_os_formulas <- univ_os_formulas[!sapply(univ_os_models, is.null)]
+  
+  univ_os_results <- lapply(univ_os_models, function(x) {
+    tryCatch({
+      x_summary <- summary(x)
+      p.value <- signif(x_summary$coef[1, 5], digits = 4)
+      wald.test <- signif(x_summary$wald["test"], digits = 4)
+      beta <- signif(x_summary$coef[1, 1], digits = 4)  # coeficient beta
+      HR <- signif(x_summary$coef[1, 2], digits = 4)    # exp(beta)
+      HR.confint.lower <- signif(x_summary$conf.int[1, "lower .95"], 4)
+      HR.confint.upper <- signif(x_summary$conf.int[1, "upper .95"], 4)
+      res <- c(beta, HR, HR.confint.lower, HR.confint.upper, wald.test, p.value)
+      names(res) <- c("beta", "HR", "HR_lower_95", "HR_upper_95", "wald.test", "p.value")
+      return(res)
+    }, error = function(e) {
+      warning(paste("Failed to extract results for model:", deparse(x$call)))
+      return(rep(NA, 6)) 
+    })
+  })
+  
+  cox_os_res <- t(as.data.frame(univ_os_results, check.names = FALSE))
+  cox_os_res <- as.data.frame(cox_os_res)
+  cox_os_res <- cox_os_res %>%
+    mutate(factor = as.character(rownames(cox_os_res)))
+  
+  save(os_covariates, cox_os_res, univ_os_models, univ_os_formulas, univ_os_results,file = cox_results_rdata)
+  write.table(cox_os_res,file = cox_results_tsv,quote = FALSE,row.names = FALSE,sep = "\t")
+  return(cox_os_res)
+}
+
+save(os_uni_cox, file = "os_uni.cox.Rdata")
+
+
+```
+
+#### dfs multi cox function
+```{r}
+
+dfs_multi_cox <- function(tab_4_dfs_cox, dfs_covariates, fixed_covariates=c("TNM_Stage", "Age", "Tumor_Left_Colon", "Tumor_Right_Colon", "Tumor_Rectum"), cox_results_tsv, cox_results_rdata, model="sur_dfs") {
+ 
+  multv_formulas <- sapply(dfs_covariates, function(x) {
+    as.formula(paste(model," ~ ", x, " + ", paste(fixed_covariates, collapse = " + ")))
+  })
+  
+  multv_models <- lapply(multv_formulas, function(x) {
+    tryCatch({
+      coxph(x, data = tab_4_dfs_cox)
+    }, error = function(e) {
+      warning(paste("Failed to fit model for", deparse(x), "\nError:", e$message))
+      return(NULL)
+    })
+  })
+  
+  valid_models <- !sapply(multv_models, is.null)
+  multv_models <- multv_models[valid_models]
+  multv_formulas <- multv_formulas[valid_models]
+  
+  multv_results <- lapply(multv_models, function(x) {
+    tryCatch({
+      x_summary <- summary(x)
+      p.value <- signif(x_summary$coef[1, 5], digits = 4)
+      wald.test <- signif(x_summary$wald["test"], digits = 4)
+      beta <- signif(x_summary$coef[1, 1], digits = 4) 
+      HR <- signif(x_summary$coef[1, 2], digits = 4)    
+      HR.confint.lower <- signif(x_summary$conf.int[1, "lower .95"], 4)
+      HR.confint.upper <- signif(x_summary$conf.int[1, "upper .95"], 4)
+      
+      res <- c(
+        beta, HR, HR.confint.lower, HR.confint.upper, 
+        wald.test, p.value
+      )
+      names(res) <- c(
+        "beta", "HR", "HR_lower_95", "HR_upper_95", 
+        "wald.test", "p.value"
+      )
+      return(res)
+    }, error = function(e) {
+      warning(paste("Failed to extract results for model:", deparse(x$call)))
+      return(rep(NA, 6))  
+    })
+  })
+  
+  multi_cox_res <- t(as.data.frame(multv_results, check.names = FALSE))
+  multi_cox_res <- as.data.frame(multi_cox_res)
+  multi_cox_res <- multi_cox_res %>%
+    mutate(factor = as.character(rownames(multi_cox_res)))
+  
+  save(multi_cox_res, multv_models, multv_formulas, dfs_covariates, file = cox_results_rdata)
+  
+  write.table(multi_cox_res, file = cox_results_tsv, quote = FALSE, row.names = FALSE, sep = "\t")
+  
+  return(multi_cox_res)
+}
+
+save(dfs_multi_cox, file = "dfs_multi.cox.Rdata")
+
+```
+
+#### os multi cox function
+```{r}
+
+os_multi_cox <- function(tab_4_os_cox, os_covariates, fixed_covariates=c("TNM_Stage", "Age", "Tumor_Left_Colon", "Tumor_Right_Colon", "Tumor_Rectum"), cox_results_tsv, cox_results_rdata,model="sur_os") {
+
+  multv_os_formulas <- sapply(os_covariates, function(x) {
+    as.formula(paste(model,"~ ", x, " + ", paste(fixed_covariates, collapse = " + ")))
+  })
+  
+  multv_os_models <- lapply(multv_os_formulas, function(x) {
+    tryCatch({
+      coxph(x, data = tab_4_os_cox)
+    }, error = function(e) {
+      warning(paste("Failed to fit model for", deparse(x), "\nError:", e$message))
+      return(NULL)
+    })
+  })
+  
+  valid_models <- !sapply(multv_os_models, is.null)
+  multv_os_models <- multv_os_models[valid_models]
+  multv_os_formulas <- multv_os_formulas[valid_models]
+  
+  multv_os_results <- lapply(multv_os_models, function(x) {
+    tryCatch({
+      x_summary <- summary(x)
+      p.value <- signif(x_summary$coef[1, 5], digits = 4)
+      wald.test <- signif(x_summary$wald["test"], digits = 4)
+      beta <- signif(x_summary$coef[1, 1], digits = 4) 
+      HR <- signif(x_summary$coef[1, 2], digits = 4)   
+      HR.confint.lower <- signif(x_summary$conf.int[1, "lower .95"], 4)
+      HR.confint.upper <- signif(x_summary$conf.int[1, "upper .95"], 4)
+      
+      res <- c(beta, HR, HR.confint.lower, HR.confint.upper, wald.test, p.value)
+      names(res) <- c("beta", "HR", "HR_lower_95", "HR_upper_95", "wald.test", "p.value")
+      return(res)
+    }, error = function(e) {
+      warning(paste("Failed to extract results for model:", deparse(x$call)))
+      return(rep(NA, 6))  
+    })
+  })
+  
+  multv_cox_os_res <- t(as.data.frame(multv_os_results, check.names = FALSE))
+  multv_cox_os_res <- as.data.frame(multv_cox_os_res)
+  multv_cox_os_res <- multv_cox_os_res %>%
+    mutate(factor = as.character(rownames(multv_cox_os_res)))
+  
+  save(os_covariates, multv_cox_os_res, multv_os_models, multv_os_formulas, multv_os_results,file = cox_results_rdata)
+  write.table(multv_cox_os_res, file = cox_results_tsv, quote = FALSE, row.names = FALSE, sep = "\t")
+  
+  return(multv_cox_os_res)
+}
+
+save(os_multi_cox, file = "os_multi.cox.Rdata")
+
+
+
+```
+
+#### dfs & os uni_multi functions packing
+```{r}
+run_survival_analysis <- function(phos_data, clin_dat=clin_dat, sur_dat=sur_dat, patient_id= patient_id, output_prefix = "phos") {
+   
+  # Prepare DFS data
+  tab_4_dfs_cox <- clin_dat[patient_id,] %>% 
+    inner_join(phos_data, by = "Sample") %>% 
+    inner_join(sur_dat[, c("Sample", "sur_dfs")], by = "Sample") 
+  
+  colnames(tab_4_dfs_cox) <- gsub("-", "_", colnames(tab_4_dfs_cox))  
+  colnames(tab_4_dfs_cox) <- gsub("/", "_", colnames(tab_4_dfs_cox))  
+  
+  dfs_covariates <- colnames(tab_4_dfs_cox[,23:ncol(tab_4_dfs_cox)-1])
+  
+  # DFS Univariate Cox
+  dfs_uni_tsv <- paste0(output_prefix, ".univariate.dfs.cox.phosphorylation.tsv")
+  dfs_uni_rdata <- paste0(output_prefix, ".univariate.dfs.cox.phosphorylation.RData")
+  dfs_results_uni <- dfs_uni_cox(
+    tab_4_dfs_cox = tab_4_dfs_cox,
+    dfs_covariates = dfs_covariates,
+    cox_results_tsv = dfs_uni_tsv,
+    cox_results_rdata = dfs_uni_rdata
+  )
+  
+  # DFS Multivariate Cox
+  dfs_multi_tsv <- paste0(output_prefix, ".multivariate.dfs.cox.phosphorylation.tsv")
+  dfs_multi_rdata <- paste0(output_prefix, ".multivariate.dfs.cox.phosphorylation.RData")
+  dfs_results_multi <- dfs_multi_cox(
+    tab_4_dfs_cox = tab_4_dfs_cox,
+    dfs_covariates = dfs_covariates,
+    cox_results_tsv = dfs_multi_tsv,
+    cox_results_rdata = dfs_multi_rdata
+  )
+  
+  # 2. OS (Overall Survival) Analysis -------------------------------------
+  
+  # Prepare OS data (with numeric conversion)
+  tab_4_os_cox <- clin_dat[patient_id,] %>%
+    inner_join(phos_data, by = "Sample") %>% 
+    inner_join(sur_dat[, c("Sample", "sur_os")], by = "Sample") 
+
+  colnames(tab_4_os_cox) <- gsub("-", "_", colnames(tab_4_os_cox))  
+  colnames(tab_4_os_cox) <- gsub("/", "_", colnames(tab_4_os_cox))  
+  
+  os_covariates <- colnames(tab_4_os_cox[,23:ncol(tab_4_os_cox)-1])
+  
+  # OS Univariate Cox
+  os_uni_tsv <- paste0(output_prefix, ".univariate.os.cox.phosphorylation.tsv")
+  os_uni_rdata <- paste0(output_prefix, ".univariate.os.cox.phosphorylation.RData")
+  os_results_uni <- os_uni_cox(
+    tab_4_os_cox = tab_4_os_cox,
+    os_covariates = os_covariates,
+    cox_results_tsv = os_uni_tsv,
+    cox_results_rdata = os_uni_rdata
+  )
+  
+  # OS Multivariate Cox
+  os_multi_tsv <- paste0(output_prefix, ".multivariate.os.cox.phosphorylation.tsv")
+  os_multi_rdata <- paste0(output_prefix, ".multivariate.os.cox.phosphorylation.RData")
+  os_results_multi <- os_multi_cox(
+    tab_4_os_cox = tab_4_os_cox,
+    os_covariates = os_covariates,
+    cox_results_tsv = os_multi_tsv,
+    cox_results_rdata = os_multi_rdata
+  )
+  
+  # Return results (optional)
+  list(
+    dfs_uni = dfs_results_uni,
+    dfs_multi = dfs_results_multi,
+    os_uni = os_results_uni,
+    os_multi = os_results_multi
+  )
+}
+
+save(run_survival_analysis, file="run_cox.function.Rdata")
+
+
+```
+
+### COX REGRESSION
+#### clinical and genomical
+```{r}
+load(file = "clindata_input.RData")
+load(file = "os_uni.cox.Rdata")
+load(file = "os_multi.cox.Rdata")
+load(file = "435sample_list.RData")
+
+###################### dfs
+tab_4_dfs_cox <- clin_dat[patient_id,]%>% 
+  inner_join(sur_dat[, c("Sample", "sur_dfs")], by = "Sample") 
+
+dfs_covariates <- colnames(tab_4_dfs_cox[,2:(ncol(tab_4_dfs_cox)-1)])
+univ_formulas <- sapply(dfs_covariates,
+                        function(x) as.formula(paste('sur_dfs ~ ', x)))
+
+univ_models <- lapply(univ_formulas, function(x){coxph(x, data = tab_4_dfs_cox)})
+
+univ_results <- lapply(univ_models,
+                       function(x){ 
+                          x <- summary(x)
+                          p.value<-signif(x$coef[1,5], digits=4)
+                          wald.test<-signif(x$wald["test"], digits=4)
+                          beta<-signif(x$coef[1,1], digits=4);#coeficient beta
+                          HR <-signif(x$coef[1,2], digits=4);#exp(beta)
+                          HR.confint.lower <- signif(x$conf.int[1,"lower .95"], 4)
+                          HR.confint.upper <- signif(x$conf.int[1,"upper .95"],4)
+                          res<-c(beta, HR, HR.confint.lower, HR.confint.upper, wald.test, p.value)
+                          names(res)<-c("beta", "HR", "HR_lower_95", "HR_upper_95", "wald.test", 
+                                        "p.value")
+                          return(res)
+                         })
+
+cox_res <- t(as.data.frame(univ_results, check.names = FALSE))
+cox_res <- as.data.frame(cox_res)
+
+cox_res <- cox_res %>%
+  mutate(factor=as.character(rownames(cox_res)))
+
+save(cox_res, univ_models, univ_formulas, dfs_covariates, file = "02.univariate.dfs.cox.Genomical_Clinical.RData")
+write.table(cox_res,file="02.univariate.dfs.cox.Genomical_Clinical.tsv",quote=F,row.names = F,sep="\t")
+
+
+###################### dfs multivariates
+tab_4_dfs_cox <- clin_dat[patient_id,] %>% 
+  inner_join(sur_dat[, c("Sample", "sur_dfs")], by = "Sample") 
+
+dfs_covariates <- colnames(tab_4_dfs_cox[,2:(ncol(tab_4_dfs_cox)-1)])
+elements_to_remove <- c("TNM_Stage", "Age", "Tumor_Left_Colon", "Tumor_Right_Colon", "Tumor_Rectum")
+dfs_covariates <- setdiff(dfs_covariates, elements_to_remove)
+
+########### dfs multivariate
+multv_formulas <- sapply(dfs_covariates,
+                        function(x) as.formula(paste('sur_dfs ~ ', x, "+ TNM_Stage + Age + Tumor_Left_Colon + Tumor_Right_Colon + Tumor_Rectum")))
+                        
+multv_models <- lapply(multv_formulas, function(x){coxph(x, data = tab_4_dfs_cox)})
+
+multv_results <- lapply(multv_models,
+                       function(x){ 
+                          x <- summary(x)
+                          p.value<-signif(x$coef[1,5], digits=4)
+                          wald.test<-signif(x$wald["test"], digits=4)
+                          beta<-signif(x$coef[1,1], digits=4);#coeficient beta
+                          HR <-signif(x$coef[1,2], digits=4);#exp(beta)
+                          HR.confint.lower <- signif(x$conf.int[1,"lower .95"], 4)
+                          HR.confint.upper <- signif(x$conf.int[1,"upper .95"],4)
+                          res<-c(beta, HR, HR.confint.lower, HR.confint.upper, wald.test, p.value)
+                          names(res)<-c("beta", "HR", "HR_lower_95", "HR_upper_95", "wald.test", 
+                                        "p.value")
+                          return(res)
+                         })
+
+multi_cox_res <- t(as.data.frame(multv_results, check.names = FALSE))
+multi_cox_res <- as.data.frame(multi_cox_res)
+
+multi_cox_res <- multi_cox_res %>%
+  mutate(factor=as.character(rownames(multi_cox_res)))
+
+save(multi_cox_res, multv_models, multv_formulas, dfs_covariates, file = "multivariate.dfs.cox.Genomical_Clinical.RData")
+write.table(multi_cox_res,file="multivariate.dfs.cox.Genomical_Clinical.tsv",quote=F,row.names = F,sep="\t")
+
+
+
+##################### os
+tab_4_os_cox <- clin_dat[patient_id,] %>% 
+  inner_join(sur_dat[, c("Sample", "sur_os")], by = "Sample") 
+
+os_covariates <- colnames(tab_4_os_cox[,2:(ncol(tab_4_os_cox)-1)])
+
+univ_os_formulas <- sapply(os_covariates,
+                        function(x) as.formula(paste('sur_os ~ ', x)))
+                        
+univ_os_models <- lapply(univ_os_formulas, function(x){coxph(x, data = tab_4_os_cox)})
+
+univ_os_results <- lapply(univ_os_models,
+                       function(x){ 
+                          x <- summary(x)
+                          p.value<-signif(x$coef[1,5], digits=4)
+                          wald.test<-signif(x$wald["test"], digits=4)
+                          beta<-signif(x$coef[1,1], digits=4);#coeficient beta
+                          HR <-signif(x$coef[1,2], digits=4);#exp(beta)
+                          HR.confint.lower <- signif(x$conf.int[1,"lower .95"], 4)
+                          HR.confint.upper <- signif(x$conf.int[1,"upper .95"],4)
+                          res<-c(beta, HR, HR.confint.lower, HR.confint.upper, wald.test, p.value)
+                          names(res)<-c("beta", "HR", "HR_lower_95", "HR_upper_95", "wald.test", 
+                                        "p.value")
+                          return(res)
+                         })
+
+cox_os_res <- t(as.data.frame(univ_os_results, check.names = FALSE))
+cox_os_res <- as.data.frame(cox_os_res)
+cox_os_res <- cox_os_res %>%
+  mutate(factor=as.character(rownames(cox_os_res)))
+
+save(os_covariates, cox_os_res, univ_os_models, univ_os_formulas, univ_os_results, file = "univariate.os.cox.Genomical_Clinical.RData")
+write.table(cox_os_res,file="univariate.os.cox.Genomical_Clinical.tsv",quote=F,row.names = F,sep="\t")
+
+
+########### os multivariate cox
+tab_4_os_cox <- clin_dat[patient_id,] %>% 
+  inner_join(sur_dat[, c("Sample", "sur_os")], by = "Sample") 
+
+os_covariates <- colnames(tab_4_os_cox[,2:(ncol(tab_4_os_cox)-1)])
+elements_to_remove <- c("TNM_Stage", "Age", "Tumor_Left_Colon", "Tumor_Right_Colon", "Tumor_Rectum")
+os_covariates <- setdiff(os_covariates, elements_to_remove)
+
+multv_os_formulas <- sapply(os_covariates,
+                        function(x) as.formula(paste('sur_os ~ ', x, "+ TNM_Stage + Age + Tumor_Left_Colon + Tumor_Right_Colon + Tumor_Rectum")))
+                        
+multv_os_models <- lapply(multv_os_formulas, function(x){coxph(x, data = tab_4_os_cox)})
+
+multv_os_results <- lapply(multv_os_models,
+                       function(x){ 
+                          x <- summary(x)
+                          p.value<-signif(x$coef[1,5], digits=4)
+                          wald.test<-signif(x$wald["test"], digits=4)
+                          beta<-signif(x$coef[1,1], digits=4);#coeficient beta
+                          HR <-signif(x$coef[1,2], digits=4);#exp(beta)
+                          HR.confint.lower <- signif(x$conf.int[1,"lower .95"], 4)
+                          HR.confint.upper <- signif(x$conf.int[1,"upper .95"],4)
+                          res<-c(beta, HR, HR.confint.lower, HR.confint.upper, wald.test, p.value)
+                          names(res)<-c("beta", "HR", "HR_lower_95", "HR_upper_95", "wald.test", 
+                                        "p.value")
+                          return(res)
+                         })
+
+multv_cox_os_res <- t(as.data.frame(multv_os_results, check.names = FALSE))
+multv_cox_os_res <- as.data.frame(multv_cox_os_res)
+multv_cox_os_res <- multv_cox_os_res %>%
+  mutate(factor=as.character(rownames(multv_cox_os_res)))
+
+save(os_covariates, multv_cox_os_res, multv_os_models, multv_os_formulas, multv_os_results, file = "multivariate.os.cox.Genomical_Clinical.RData")
+write.table(multv_cox_os_res,file="multivariate.os.cox.Genomical_Clinical.tsv",quote=F,row.names = F,sep="\t")
+
+
+```
+
+
+
+
+##### DFS events distribution in different time interval
+```{r}
+load(file = "clindata_input.RData")
+
+
+
+####### 4stages
+sur_dat_1 <- merge(sur_dat,clin_dat[,c("Sample","TNM_Stage")])
+sur_dat <- sur_dat_1 %>%
+  rename(Stage=TNM_Stage) %>%
+  filter(!is.na(Stage))
+
+time_points <- c(12, 24, 36, 60)
+
+status_data_stage <- lapply(time_points, function(t) {
+  lapply(unique(sur_dat$Stage), function(s) {
+    stage_data <- sur_dat %>% filter(Stage == s)
+    status_at_t <- ifelse(stage_data$sur_dfs[,"time"] <= t & stage_data$sur_dfs[,"status"] == 1, 1, 0)
+    status_at_t <- ifelse(stage_data$sur_dfs[,"time"] < t & stage_data$sur_dfs[,"status"] == 0, NA, status_at_t)
+    
+    data.frame(
+      Sample = stage_data$Sample,
+      Stage = s,
+      Time = paste0(t, "months"),
+      Status = factor(status_at_t, levels = c(0, 1), labels = c("No event", "Event"))
+    )
+  }) %>% bind_rows()
+}) %>% bind_rows() %>% na.omit()
+
+proportion_data_stage <- status_data_stage %>%
+  group_by(Time, Stage, Status) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(Time, Stage) %>%
+  mutate(Proportion = Count / sum(Count),
+         Time = factor(Time, levels = paste0(time_points, "months")))
+
+p_grouped <- ggplot(proportion_data_stage, aes(x = Time, y = Proportion, fill = Status)) +
+  geom_col(position = "stack", width = 0.7, alpha = 0.8) +
+  facet_wrap(~ Stage, nrow = 1) +  
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")), 
+            position = position_stack(vjust = 0.5), size = 3) +
+  scale_fill_manual(values = c("Event" = "#E74C3C", "No event" = "#3498DB")) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "DFS Status Proportion by Stage and Time",
+       x = "",
+       y = "Proportion",
+       fill = "Status") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "top")
+
+
+
+####### detailed stages
+sur_dat_1 <- merge(sur_dat,clin_stages[,c("Sample","TNM")],all.x=T)
+
+sur_dat <- sur_dat_1 %>%
+  rename(Stage=TNM) %>%
+  filter(!is.na(Stage) & Stage!=0)
+
+time_points <- c(12, 24, 36, 60)
+
+status_data_stage <- lapply(time_points, function(t) {
+  lapply(unique(sur_dat$Stage), function(s) {
+    stage_data <- sur_dat %>% filter(Stage == s)
+    
+    status_at_t <- ifelse(stage_data$sur_dfs[,"time"] <= t & stage_data$sur_dfs[,"status"] == 1, 1, 0)
+    status_at_t <- ifelse(stage_data$sur_dfs[,"time"] < t & stage_data$sur_dfs[,"status"] == 0, NA, status_at_t)
+    
+    data.frame(
+      Sample = stage_data$Sample,
+      Stage = s,
+      Time = paste0(t, "months"),
+      Status = factor(status_at_t, levels = c(0, 1), labels = c("No event", "Event"))
+    )
+  }) %>% bind_rows()
+}) %>% bind_rows() %>% na.omit()
+
+proportion_data_stage <- status_data_stage %>%
+  group_by(Time, Stage, Status) %>%
+  summarise(Count = n(), .groups = "drop") %>%
+  group_by(Time, Stage) %>%
+  mutate(Proportion = Count / sum(Count),
+         Time = factor(Time, levels = paste0(time_points, "months")))
+
+p_grouped <- ggplot(proportion_data_stage, aes(x = Time, y = Proportion, fill = Status)) +
+  geom_col(position = "stack", width = 0.7, alpha = 0.8) +
+  facet_wrap(~ Stage, nrow = 1) +  
+  geom_text(aes(label = paste0(round(Proportion * 100, 1), "%")), 
+            position = position_stack(vjust = 0.5), size = 3) +
+  scale_fill_manual(values = c("Event" = "#E74C3C", "No event" = "#3498DB")) +
+  scale_y_continuous(labels = scales::percent) +
+  labs(title = "DFS Status Proportion by Stage and Time",
+       x = "",
+       y = "Proportion",
+       fill = "Status") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "top")
+
+
+```
+
+#### protein 
+```{r}
+load(file = "protein.RData")
+load(file = "clindata_input.RData")
+load(file = "dfs_uni.cox.Rdata")
+load(file = "os_uni.cox.Rdata")
+load(file = "dfs_multi.cox.Rdata")
+load(file = "os_multi.cox.Rdata")
+load(file = "435sample_list.RData")
+###################### dfs 
+tab_4_dfs_cox <- clin_dat[patient_id,] %>% 
+  inner_join(pro_dat, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_dfs")], by = "Sample") 
+
+colnames(tab_4_dfs_cox) <- gsub("-", "_", colnames(tab_4_dfs_cox))  
+colnames(tab_4_dfs_cox) <- gsub("/", "_", colnames(tab_4_dfs_cox))  
+
+dfs_covariates <- colnames(tab_4_dfs_cox[,23:ncol(tab_4_dfs_cox)-1])
+tail(dfs_covariates)
+head(dfs_covariates)
+
+###################### dfs uni
+dfs_results <- dfs_uni_cox(
+  dfs_covariates = dfs_covariates,
+  tab_4_dfs_cox=tab_4_dfs_cox,
+  cox_results_tsv = "univariate.dfs.cox.protein.tsv",
+  cox_results_rdata = "univariate.dfs.cox.protein.RData"
+)
+
+########### dfs multivariate
+dfs_results <- dfs_multi_cox(
+  dfs_covariates = dfs_covariates,
+  tab_4_dfs_cox=tab_4_dfs_cox,
+  cox_results_tsv = "multivariate.dfs.cox.protein.tsv",
+  cox_results_rdata = "multivariate.dfs.cox.protein.RData"
+)
+
+##################### os
+tab_4_os_cox <- clin_dat[patient_id,] %>% 
+  inner_join(pro_dat, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_os")], by = "Sample") 
+
+colnames(tab_4_os_cox) <- gsub("-", "_", colnames(tab_4_os_cox))  
+colnames(tab_4_os_cox) <- gsub("/", "_", colnames(tab_4_os_cox))  
+
+tab_4_os_cox <- tab_4_os_cox %>%
+  mutate_at(vars(-Sample, -sur_os,-Gender), as.numeric)
+
+os_covariates <- colnames(tab_4_os_cox[,23:ncol(tab_4_os_cox)-1])
+head(os_covariates)
+tail(os_covariates)
+
+##################### os uni
+os_uni_cox(
+  os_covariates = os_covariates,
+  cox_results_tsv = "univariate.os.cox.protein.tsv",
+  cox_results_rdata = "univariate.os.cox.protein.RData"
+)
+
+########### os multivariate cox
+
+cox_results <- os_multi_cox(
+  os_covariates = os_covariates,
+  cox_results_tsv = "multivariate.os.cox.protein.tsv",
+  cox_results_rdata = "multivariate.os.cox.protein.RData"
+)
+```
+
+##### protein diff results & Top 50%
+```{r}
+load(file = "protein.RData")
+load(file="univariate.os.cox.protein.RData")
+load(file="multivariate.os.cox.protein.RData")
+rm(multv_os_models,multv_os_formulas,univ_os_formulas,univ_os_models,os_covariates,multv_os_results,univ_os_results)
+load(file="univariate.dfs.cox.protein.RData")
+load(file="multivariate.dfs.cox.protein.RData")
+rm(multv_formulas, multv_models,univ_formulas,univ_models,dfs_covariates)
+### diff
+pro_diff_formatted <- pro_diff %>%
+  mutate(match_id=paste0(Gene,"_pro")) %>%
+  mutate(match_id=gsub("-","_",match_id)) %>%
+  mutate(match_id=gsub("/","_",match_id)) %>%
+  filter(Gene!="")
+
+#### Top 50%
+colnames(pro_dat) <- gsub("/","_",colnames(pro_dat))
+pro_mean <- pro_dat %>%
+  select(-Sample) %>%
+  colMeans()
+
+pro_mean_df <- data.frame(
+  Gene = names(pro_mean),
+  pro_mean = as.numeric(pro_mean)
+)
+
+median_mean <- median(pro_mean_df$pro_mean)
+
+pro_mean_df <- pro_mean_df %>% 
+  mutate(group = ifelse(pro_mean > median_mean,"Top50%","."))
+
+## merge
+pro_diff_formatted_top50 <- merge(pro_diff_formatted, pro_mean_df, by.x="match_id",by.y="Gene", all=T)
+
+cox_res_match <- merge( cox_res, pro_diff_formatted_top50[,c("wilcoxtest_log2FC","wilcox_FDR","Regulated","match_id","group")], by.y="match_id",by.x="factor",all.x=T)
+
+cox_os_res_match <- merge(cox_os_res, pro_diff_formatted_top50[,c("wilcoxtest_log2FC","wilcox_FDR","Regulated","match_id","group")], by.y="match_id",by.x="factor",all.x=T)
+
+multi_cox_res_match <- merge(multi_cox_res, pro_diff_formatted_top50[,c("wilcoxtest_log2FC","wilcox_FDR","Regulated","match_id","group")], by.y="match_id",by.x="factor",all.x=T)
+
+multi_cox_os_res_match <- merge(multv_cox_os_res, pro_diff_formatted_top50[,c("wilcoxtest_log2FC","wilcox_FDR","Regulated","match_id","group")], by.y="match_id",by.x="factor",all.x=T)
+
+#### save results
+write.table(cox_res_match, "univariate.dfs.cox.protein.diff.tsv", sep="\t", row.names = F, quote=F)
+
+write.table(cox_os_res_match, "univariate.os.cox.protein.diff.tsv", sep="\t", row.names = F, quote=F)
+
+write.table(multi_cox_res_match, "multivariate.dfs.cox.protein.diff.tsv", sep="\t", row.names = F, quote=F)
+
+write.table(multi_cox_os_res_match, "multivariate.os.cox.protein.diff.tsv", sep="\t", row.names = F, quote=F)
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+#### RNA
+```{r}
+load(file = "RNA_log2_plus1.RData")
+load(file = "clindata_input.RData")
+load(file = "435sample_list.RData")
+load(file = "dfs_uni.cox.Rdata")
+load(file = "os_uni.cox.Rdata")
+load(file = "dfs_multi.cox.Rdata")
+load(file = "os_multi.cox.Rdata")
+
+###################### dfs
+tab_4_dfs_cox <- clin_dat[patient_id,] %>% 
+  inner_join(exp_dat, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_dfs")], by = "Sample") 
+
+colnames(tab_4_dfs_cox) <- gsub("-", "_", colnames(tab_4_dfs_cox))  
+
+dfs_covariates <- colnames(tab_4_dfs_cox[,23:ncol(tab_4_dfs_cox)-1])
+tail(dfs_covariates)
+head(dfs_covariates)
+
+##################### dfs uni
+dfs_results <- dfs_uni_cox(
+  dfs_covariates = dfs_covariates,
+  tab_4_dfs_cox=tab_4_dfs_cox,
+  cox_results_tsv = "univariate.dfs.cox.RNA.tsv",
+  cox_results_rdata = "univariate.dfs.cox.RNA.RData"
+)
+
+########## dfs multivariate
+dfs_results <- dfs_multi_cox(
+  dfs_covariates = dfs_covariates,
+  tab_4_dfs_cox=tab_4_dfs_cox,
+  cox_results_tsv = "multivariate.dfs.cox.RNA.tsv",
+  cox_results_rdata = "multivariate.dfs.cox.RNA.RData"
+)
+
+##################### os
+tab_4_os_cox <- clin_dat[patient_id,] %>% 
+  inner_join(exp_dat, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_os")], by = "Sample") 
+
+colnames(tab_4_os_cox) <- gsub("-", "_", colnames(tab_4_os_cox))  
+
+os_covariates <- colnames(tab_4_os_cox[,23:ncol(tab_4_os_cox)-1])
+head(os_covariates)
+tail(os_covariates)
+##################### os uni
+os_uni_cox(
+  os_covariates = os_covariates,
+  cox_results_tsv = "univariate.os.cox.RNA.tsv",
+  cox_results_rdata = "univariate.os.cox.RNA.RData"
+)
+
+########### os multivariate cox
+
+cox_results <- os_multi_cox(
+  os_covariates = os_covariates,
+  cox_results_tsv = "multivariate.os.cox.RNA.tsv",
+  cox_results_rdata = "multivariate.os.cox.RNA.RData"
+)
+```
+
+
+##### RNA in 967 samples
+```{r}
+load(file = "RNA_log2_plus1.RData")
+load(file = "clindata_input.RData")
+load(file = "remaining_sample_list.RData")
+load(file = "dfs_uni.cox.Rdata")
+load(file = "os_uni.cox.Rdata")
+load(file = "dfs_multi.cox.Rdata")
+load(file = "os_multi.cox.Rdata")
+load(file="532.result.Rdata")
+
+###################### dfs
+tab_4_dfs_cox <- clin_dat[all_patient_id,] %>% 
+  inner_join(exp_dat, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_dfs")], by = "Sample") 
+
+colnames(tab_4_dfs_cox) <- gsub("-", "_", colnames(tab_4_dfs_cox))  
+
+dfs_covariates <- colnames(tab_4_dfs_cox[,23:ncol(tab_4_dfs_cox)-1])
+dfs_covariates <- dfs_covariates[dfs_covariates %in% DFS_OS_22pair_gene$factor]
+tail(dfs_covariates)
+head(dfs_covariates)
+
+##################### dfs uni
+dfs_results <- dfs_uni_cox(
+  dfs_covariates = dfs_covariates,
+  tab_4_dfs_cox=tab_4_dfs_cox,
+  cox_results_tsv = "univariate.dfs.remaining_samples.cox.RNA.tsv",
+  cox_results_rdata = "univariate.dfs.remaining_samples.cox.RNA.RData"
+)
+
+########## dfs multivariate
+dfs_results <- dfs_multi_cox(
+  dfs_covariates = dfs_covariates,
+  tab_4_dfs_cox=tab_4_dfs_cox,
+  cox_results_tsv = "multivariate.dfs.remaining_samples.cox.RNA.tsv",
+  cox_results_rdata = "multivariate.dfs.remaining_samples.cox.RNA.RData"
+)
+
+##################### os
+tab_4_os_cox <- clin_dat[all_patient_id,] %>% 
+  inner_join(exp_dat, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_os")], by = "Sample") 
+
+colnames(tab_4_os_cox) <- gsub("-", "_", colnames(tab_4_os_cox))  
+
+os_covariates <- colnames(tab_4_os_cox[,23:ncol(tab_4_os_cox)-1])
+os_covariates <- os_covariates[os_covariates %in% DFS_OS_22pair_gene$factor]
+
+
+head(os_covariates)
+tail(os_covariates)
+##################### os uni
+os_uni_cox(
+  os_covariates = os_covariates,
+  tab_4_os_cox=tab_4_os_cox,
+  cox_results_tsv = "univariate.os.remaining_samples.cox.RNA.tsv",
+  cox_results_rdata = "univariate.os.remaining_samples.cox.RNA.RData"
+)
+
+########### os multivariate cox
+
+cox_results <- os_multi_cox(
+  os_covariates = os_covariates,
+  tab_4_os_cox=tab_4_os_cox,
+  cox_results_tsv = "multivariate.os.remaining_samples.cox.RNA.tsv",
+  cox_results_rdata = "multivariate.os.remaining_samples.cox.RNA.RData"
+)
+```
+
+##### RNA diff and top50%
+```{r}
+load(file = "RNA_log2_plus1.RData")
+load(file="univariate.dfs.cox.RNA.RData")
+load(file="multivariate.dfs.cox.RNA.RData")
+rm(multv_formulas, multv_models,univ_formulas,univ_models,dfs_covariates)
+load(file="univariate.os.cox.RNA.RData")
+load(file="multivariate.os.cox.RNA.RData")
+rm(multv_os_models,multv_os_formulas,univ_os_formulas,univ_os_models,os_covariates,multv_os_results,univ_os_results)
+gene_id <- read.table("human.gene2symbol_unique_biotype.txt",sep="\t",header=T)
+
+### input formatted
+
+
+df_formatted <- function(factor) {
+  factor <- gsub("/","_",factor)
+  factor <- gsub("-","_",factor)
+  factor <- gsub(".","_",factor,fixed = T)
+  return(factor)
+}
+
+colnames(exp_dat) <- df_formatted(colnames(exp_dat))
+cox_res$factor  <- df_formatted(cox_res$factor)
+cox_os_res$factor  <- df_formatted(cox_os_res$factor)
+multi_cox_res$factor  <- df_formatted(multi_cox_res$factor)
+multv_cox_os_res$factor  <- df_formatted(multv_cox_os_res$factor)
+
+exp_diff_1 <- merge(exp_diff,gene_id[,c("GeneID","Symbol")], by.x="ENTREZID",by.y="GeneID")
+### diff
+exp_diff_formatted <- exp_diff_1 %>%
+  filter(Symbol!="") %>%
+  mutate(match_id=paste0(Symbol,"_exp")) %>%
+  mutate(match_id=gsub("-","_",match_id)) %>%
+  mutate(match_id=gsub("/","_",match_id)) 
+
+#### Top 50%
+exp_mean <- exp_dat %>%
+  select(-Sample) %>%
+  colMeans()
+
+exp_mean_df <- data.frame(
+  Gene = names(exp_mean),
+  exp_mean = as.numeric(exp_mean),
+  check.names=F
+)
+
+median_mean <- median(exp_mean_df$exp_mean)
+
+exp_mean_df <- exp_mean_df %>% 
+  mutate(group = ifelse(exp_mean > median_mean,"Top50%","."))
+
+## merge
+exp_diff_formatted_top50 <- merge(exp_diff_formatted, exp_mean_df, by.x="match_id",by.y="Gene", all=T)
+
+cox_res_match <- merge(cox_res, exp_diff_formatted_top50[,c("log2FoldChange.Tumor.Normal.","Padj","Up.Down.Regulation","match_id","group")], by.y="match_id",by.x="factor",all.x=T)
+
+cox_os_res_match <- merge(cox_os_res, exp_diff_formatted_top50[,c("log2FoldChange.Tumor.Normal.","Padj","Up.Down.Regulation","match_id","group")], by.y="match_id",by.x="factor",all.x=T)
+
+multi_cox_res_match <- merge(multi_cox_res, exp_diff_formatted_top50[,c("log2FoldChange.Tumor.Normal.","Padj","Up.Down.Regulation","match_id","group")], by.y="match_id",by.x="factor",all.x=T)
+
+multi_cox_os_res_match <- merge(multv_cox_os_res, exp_diff_formatted_top50[,c("log2FoldChange.Tumor.Normal.","Padj","Up.Down.Regulation","match_id","group")], by.y="match_id",by.x="factor",all.x=T)
+
+#### save results
+write.table(cox_res_match, "univariate.dfs.cox.RNA.diff.tsv", sep="\t", row.names = F, quote=F)
+
+write.table(cox_os_res_match, "univariate.os.cox.RNA.diff.tsv", sep="\t", row.names = F, quote=F)
+
+write.table(multi_cox_res_match, "multivariate.dfs.cox.RNA.diff.tsv", sep="\t", row.names = F, quote=F)
+
+write.table(multi_cox_os_res_match, "multivariate.os.cox.RNA.diff.tsv", sep="\t", row.names = F, quote=F)
+
+```
+
+#### sv hotspots
+```{r}
+load(file = "sv_hotspot.RData")
+load(file = "clindata_input.RData")
+load(file = "435sample_list.RData")
+load(file = "dfs_uni.cox.Rdata")
+load(file = "os_uni.cox.Rdata")
+load(file = "dfs_multi.cox.Rdata")
+load(file = "os_multi.cox.Rdata")
+
+###################### dfs
+tab_4_dfs_cox <- clin_dat[patient_id,] %>% 
+  inner_join(sv_tab, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_dfs")], by = "Sample") 
+
+
+colnames(tab_4_dfs_cox) <- gsub("-", "_", colnames(tab_4_dfs_cox))  
+colnames(tab_4_dfs_cox) <- gsub(",", ".", colnames(tab_4_dfs_cox))  
+
+dfs_covariates <- colnames(tab_4_dfs_cox[,23:ncol(tab_4_dfs_cox)-1])
+tail(dfs_covariates)
+head(dfs_covariates)
+
+##################### dfs uni
+dfs_results <- dfs_uni_cox(
+  tab_4_dfs_cox = tab_4_dfs_cox,
+  dfs_covariates = dfs_covariates,
+  cox_results_tsv = "univariate.dfs.cox.sv_hotspots.tsv",
+  cox_results_rdata = "univariate.dfs.cox.sv_hotspots.RData"
+)
+
+########## dfs multivariate
+dfs_results <- dfs_multi_cox(
+  tab_4_dfs_cox = tab_4_dfs_cox,
+  dfs_covariates = dfs_covariates,
+  cox_results_tsv = "multivariate.dfs.cox.sv_hotspots.tsv",
+  cox_results_rdata = "multivariate.dfs.cox.sv_hotspots.RData"
+)
+
+
+##################### os
+tab_4_os_cox <- clin_dat[patient_id,] %>% 
+  inner_join(sv_tab, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_os")], by = "Sample") 
+
+colnames(tab_4_os_cox) <- gsub("-", "_", colnames(tab_4_os_cox))  
+colnames(tab_4_os_cox) <- gsub(",", ".", colnames(tab_4_os_cox))  
+
+tab_4_os_cox$Gender <- factor(tab_4_os_cox$Gender,levels = c("0","1"))
+tab_4_os_cox <- tab_4_os_cox %>%
+  mutate_at(vars(-Sample, -sur_os,-Gender), as.numeric)
+
+os_covariates <- colnames(tab_4_os_cox[,23:ncol(tab_4_os_cox)-1])
+head(os_covariates)
+tail(os_covariates)
+
+##################### os uni
+os_uni_cox(
+  tab_4_os_cox = tab_4_os_cox,
+  os_covariates = os_covariates,
+  cox_results_tsv = "univariate.os.cox.sv_hotspots.tsv",
+  cox_results_rdata = "univariate.os.cox.sv_hotspots.RData"
+)
+
+########### os multivariate cox
+
+cox_results <- os_multi_cox(
+  tab_4_os_cox = tab_4_os_cox,
+  os_covariates = os_covariates,
+  cox_results_tsv = "multivariate.os.cox.sv_hotspots.tsv",
+  cox_results_rdata = "multivariate.os.cox.sv_hotspots.RData"
+)
+
+
+
+```
+
+#### snvindel drivers
+```{r}
+load(file = "snv_drivers.RData")
+load(file = "clindata_input.RData")
+load(file = "435sample_list.RData")
+load(file = "dfs_uni.cox.Rdata")
+load(file = "os_uni.cox.Rdata")
+load(file = "dfs_multi.cox.Rdata")
+load(file = "os_multi.cox.Rdata")
+
+###################### dfs
+tab_4_dfs_cox <- clin_dat[patient_id,] %>% 
+  inner_join(snv_driver_tab, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_dfs")], by = "Sample") 
+
+
+dfs_covariates <- colnames(tab_4_dfs_cox[,23:ncol(tab_4_dfs_cox)-1])
+tail(dfs_covariates)
+head(dfs_covariates)
+
+##################### dfs uni
+dfs_uni_results <- dfs_uni_cox(
+  tab_4_dfs_cox = tab_4_dfs_cox,
+  dfs_covariates = dfs_covariates,
+  cox_results_tsv = "univariate.dfs.cox.snv_indel.tsv",
+  cox_results_rdata = "univariate.dfs.cox.snv_indel.RData"
+)
+
+########## dfs multivariate
+dfs_multi_results <- dfs_multi_cox(
+  tab_4_dfs_cox = tab_4_dfs_cox,
+  dfs_covariates = dfs_covariates,
+  cox_results_tsv = "multivariate.dfs.cox.snv_indel.tsv",
+  cox_results_rdata = "multivariate.dfs.cox.snv_indel.RData"
+)
+
+
+##################### os
+tab_4_os_cox <- clin_dat[patient_id,] %>% 
+  inner_join(snv_driver_tab, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_os")], by = "Sample") 
+
+tab_4_os_cox$Gender <- factor(tab_4_os_cox$Gender,levels = c("0","1"))
+tab_4_os_cox <- tab_4_os_cox %>%
+  mutate_at(vars(-Sample, -sur_os,-Gender), as.numeric)
+
+os_covariates <- colnames(tab_4_os_cox[,23:ncol(tab_4_os_cox)-1])
+head(os_covariates)
+tail(os_covariates)
+
+##################### os uni
+os_uni_results <- os_uni_cox(
+  tab_4_os_cox = tab_4_os_cox,
+  os_covariates = os_covariates,
+  cox_results_tsv = "univariate.os.cox.snv_indel.tsv",
+  cox_results_rdata = "univariate.os.cox.snv_indel.RData"
+)
+
+########### os multivariate cox
+
+os_multi_results <- os_multi_cox(
+  tab_4_os_cox = tab_4_os_cox,
+  os_covariates = os_covariates,
+  cox_results_tsv = "multivariate.os.cox.snv_indel.tsv",
+  cox_results_rdata = "multivariate.os.cox.snv_indel.RData"
+)
+
+
+
+```
+
+#### focal_cnv, 01
+```{r  }
+load(file = "focal_cnv.RData")
+load(file = "clindata_input.RData")
+load(file = "435sample_list.RData")
+load(file = "dfs_uni.cox.Rdata")
+load(file = "os_uni.cox.Rdata")
+load(file = "dfs_multi.cox.Rdata")
+load(file = "os_multi.cox.Rdata")
+###################### dfs
+tab_4_dfs_cox <- clin_dat[patient_id,] %>% 
+  inner_join(focal_cnv, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_dfs")], by = "Sample") 
+
+
+colnames(tab_4_dfs_cox) <- gsub("-", "_", colnames(tab_4_dfs_cox))  
+colnames(tab_4_dfs_cox) <- gsub(",", ".", colnames(tab_4_dfs_cox))  
+
+dfs_covariates <- colnames(tab_4_dfs_cox[,23:ncol(tab_4_dfs_cox)-1])
+tail(dfs_covariates)
+head(dfs_covariates)
+
+##################### dfs uni
+dfs_results <- dfs_uni_cox(
+  tab_4_dfs_cox = tab_4_dfs_cox,
+  dfs_covariates = dfs_covariates,
+  cox_results_tsv = "univariate.dfs.cox.focal_cnv.tsv",
+  cox_results_rdata = "univariate.dfs.cox.focal_cnv.RData"
+)
+
+########## dfs multivariate
+dfs_results <- dfs_multi_cox(
+  tab_4_dfs_cox = tab_4_dfs_cox,
+  dfs_covariates = dfs_covariates,
+  cox_results_tsv = "multivariate.dfs.cox.focal_cnv.tsv",
+  cox_results_rdata = "multivariate.dfs.cox.focal_cnv.RData"
+)
+
+
+##################### os
+tab_4_os_cox <- clin_dat[patient_id,] %>% 
+  inner_join(focal_cnv, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_os")], by = "Sample") 
+
+colnames(tab_4_os_cox) <- gsub("-", "_", colnames(tab_4_os_cox))  
+colnames(tab_4_os_cox) <- gsub(",", ".", colnames(tab_4_os_cox))  
+
+tab_4_os_cox$Gender <- factor(tab_4_os_cox$Gender,levels = c("0","1"))
+tab_4_os_cox <- tab_4_os_cox %>%
+  mutate_at(vars(-Sample, -sur_os,-Gender), as.numeric)
+
+os_covariates <- colnames(tab_4_os_cox[,23:ncol(tab_4_os_cox)-1])
+head(os_covariates)
+tail(os_covariates)
+
+##################### os uni
+os_uni_cox(
+  tab_4_os_cox = tab_4_os_cox,
+  os_covariates = os_covariates,
+  cox_results_tsv = "univariate.os.cox.focal_cnv.tsv",
+  cox_results_rdata = "univariate.os.cox.focal_cnv.RData"
+)
+
+########### os multivariate cox
+
+cox_results <- os_multi_cox(
+  tab_4_os_cox = tab_4_os_cox,
+  os_covariates = os_covariates,
+  cox_results_tsv = "multivariate.os.cox.focal_cnv.tsv",
+  cox_results_rdata = "multivariate.os.cox.focal_cnv.RData"
+)
+
+
+
+```
+
+
+#### focal_cnv gene (for selecting a representative gene in focal CNV for pathway enrichment)
+```{r}
+load(file = "focal_cnv.RData")
+load(file = "clindata_input.RData")
+load(file = "435sample_list.RData")
+load(file = "dfs_uni.cox.Rdata")
+load(file = "os_uni.cox.Rdata")
+load(file = "dfs_multi.cox.Rdata")
+load(file = "os_multi.cox.Rdata")
+
+focal_cnv_annotation$Gene  <- gsub("-", "_", focal_cnv_annotation$Gene )  
+focal_cnv_annotation$Gene  <- gsub(",", ".", focal_cnv_annotation$Gene )  
+###################### dfs
+tab_4_dfs_cox <- clin_dat[patient_id,] %>% 
+  inner_join(focal_cnv_gene_logratio, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_dfs")], by = "Sample") 
+
+colnames(tab_4_dfs_cox) <- gsub("-", "_", colnames(tab_4_dfs_cox))  
+colnames(tab_4_dfs_cox) <- gsub(",", "_", colnames(tab_4_dfs_cox))  
+colnames(tab_4_dfs_cox) <- gsub(".", "_", colnames(tab_4_dfs_cox), fixed=T)  
+
+dfs_covariates <- focal_cnv_annotation$Gene
+dfs_covariates <- gsub("-", "_", dfs_covariates)  
+dfs_covariates <- gsub(",", ".", dfs_covariates)  
+
+tail(dfs_covariates)
+head(dfs_covariates)
+all(dfs_covariates %in% colnames(tab_4_dfs_cox))
+dfs_covariates[!dfs_covariates %in% colnames(tab_4_dfs_cox)]
+
+##################### dfs uni
+dfs_uni_results <- dfs_uni_cox(
+  tab_4_dfs_cox = tab_4_dfs_cox,
+  dfs_covariates = dfs_covariates,
+  cox_results_tsv = "univariate.dfs.cox.focal_cnv.gene.tsv",
+  cox_results_rdata = "univariate.dfs.cox.focal_cnv.gene.RData"
+)
+
+########## dfs multivariate
+dfs_multi_results <- dfs_multi_cox(
+  tab_4_dfs_cox = tab_4_dfs_cox,
+  dfs_covariates = dfs_covariates,
+  cox_results_tsv = "multivariate.dfs.cox.focal_cnv.gene.tsv",
+  cox_results_rdata = "multivariate.dfs.cox.focal_cnv.gene.RData"
+)
+
+
+##################### os
+tab_4_os_cox <- clin_dat[patient_id,] %>% 
+  inner_join(focal_cnv_gene_logratio, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_os")], by = "Sample") 
+
+colnames(tab_4_os_cox) <- gsub("-", "_", colnames(tab_4_os_cox))  
+colnames(tab_4_os_cox) <- gsub(",", ".", colnames(tab_4_os_cox))  
+colnames(tab_4_os_cox) <- gsub(".", "_", colnames(tab_4_os_cox), fixed=T)  
+
+os_covariates <- focal_cnv_annotation$Gene
+os_covariates <- gsub("-", "_", os_covariates)  
+os_covariates <- gsub(",", ".", os_covariates)  
+
+head(os_covariates)
+tail(os_covariates)
+
+##################### os uni
+os_uni_results <- os_uni_cox(
+  tab_4_os_cox = tab_4_os_cox,
+  os_covariates = os_covariates,
+  cox_results_tsv = "univariate.os.cox.focal_cnv.gene.tsv",
+  cox_results_rdata = "univariate.os.cox.focal_cnv.gene.RData"
+)
+
+########### os multivariate cox
+
+os_multi_results <- os_multi_cox(
+  tab_4_os_cox = tab_4_os_cox,
+  os_covariates = os_covariates,
+  cox_results_tsv = "multivariate.os.cox.focal_cnv.gene.tsv",
+  cox_results_rdata = "multivariate.os.cox.focal_cnv.gene.RData"
+)
+
+```
+
+##### find the representative genes for each focal CNV
+```{r}
+############# select the most significant gene represent the Focal_CNV genes
+load(file = "focal_cnv.RData")
+
+
+os_uni_results <- read.table("univariate.os.cox.focal_cnv.gene.tsv",sep="\t",header=T,check.names=F)
+dfs_uni_results <- read.table("univariate.dfs.cox.focal_cnv.gene.tsv",sep="\t",header=T,check.names=F)
+
+
+focal_cnv_annotation$Gene  <- gsub("-", "_", focal_cnv_annotation$Gene )  
+focal_cnv_annotation$Gene  <- gsub(",", ".", focal_cnv_annotation$Gene )  
+
+dfs_uni_results_1 <- merge(focal_cnv_annotation, dfs_uni_results[,c("factor","p_value")], by.x="Gene",by.y="factor", all.x=T) %>%
+  mutate(model="DFS")
+
+os_uni_results_1 <- merge(focal_cnv_annotation,
+os_uni_results[,c("factor","p.value")],by.x="Gene",by.y="factor", all.x=T) %>%
+  rename(p_value=p.value) %>%
+  mutate(model="OS")
+
+focal_uni_results <- rbind(dfs_uni_results_1, os_uni_results_1)
+
+focal_uni_results <- focal_uni_results %>%
+  group_by(Focal_CNV_id,model) %>%
+  filter(!is.na(p_value)) %>%
+  filter(p_value==min(p_value,na.rm=T)) %>%
+  summarise(
+    Gene = paste(Gene,collapse=","),
+    p_value = first(p_value),
+    Focal_CNV_id = first(Focal_CNV_id),
+    model = first(model),
+    .groups = "drop"
+  )
+
+save(focal_uni_results, file="univariate.cox.focal_cnv.unique_gene.RData")
+
+```
+
+#### methylation, 0/1 input
+```{r}
+load(file = "methylation_mean.binary.RData")
+load(file = "435sample_list.RData")
+load(file = "dfs_uni.cox.Rdata")
+load(file = "os_uni.cox.Rdata")
+load(file = "dfs_multi.cox.Rdata")
+load(file = "os_multi.cox.Rdata")
+load(file = "clindata_input.RData")
+
+###################### dfs
+tab_4_dfs_cox <- clin_dat[patient_id,] %>% 
+  inner_join(methylation_df, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_dfs")], by = "Sample") 
+
+
+colnames(tab_4_dfs_cox) <- gsub("-", "_", colnames(tab_4_dfs_cox))  
+
+dfs_covariates <- colnames(tab_4_dfs_cox[,23:ncol(tab_4_dfs_cox)-1])
+tail(dfs_covariates)
+head(dfs_covariates)
+
+##################### dfs uni
+dfs_results <- dfs_uni_cox(
+  tab_4_dfs_cox=tab_4_dfs_cox,
+  dfs_covariates = dfs_covariates,
+  cox_results_tsv = "univariate.dfs.cox.binary.methylation.tsv",
+  cox_results_rdata = "univariate.dfs.cox.binary.methylation.RData"
+)
+
+########## dfs multivariate
+dfs_results <- dfs_multi_cox(
+  tab_4_dfs_cox=tab_4_dfs_cox,
+  dfs_covariates = dfs_covariates,
+  cox_results_tsv = "multivariate.dfs.cox.binary.methylation.tsv",
+  cox_results_rdata = "multivariate.dfs.cox.binary.methylation.RData"
+)
+
+
+###################### dfs, genebody
+tab_4_dfs_cox <- clin_dat[patient_id,] %>% 
+  inner_join(methylation_df_genebody, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_dfs")], by = "Sample") 
+
+
+colnames(tab_4_dfs_cox) <- gsub("-", "_", colnames(tab_4_dfs_cox))  
+
+dfs_covariates <- colnames(tab_4_dfs_cox[,23:ncol(tab_4_dfs_cox)-1])
+tail(dfs_covariates)
+head(dfs_covariates)
+
+##################### dfs uni, genebody
+dfs_results <- dfs_uni_cox(
+  tab_4_dfs_cox=tab_4_dfs_cox,
+  dfs_covariates = dfs_covariates,
+  cox_results_tsv = "univariate.dfs.cox.binary.methylation.genebody.tsv",
+  cox_results_rdata = "univariate.dfs.cox.binary.methylation.genebody.RData"
+)
+
+########## dfs multivariate, genebody
+dfs_results <- dfs_multi_cox(
+  tab_4_dfs_cox=tab_4_dfs_cox,
+  dfs_covariates = dfs_covariates,
+  cox_results_tsv = "multivariate.dfs.cox.binary.methylation.genebody.tsv",
+  cox_results_rdata = "multivariate.dfs.cox.binary.methylation.genebody.RData"
+)
+
+##################### os
+tab_4_os_cox <- clin_dat[patient_id,] %>% 
+  inner_join(methylation_df, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_os")], by = "Sample") 
+
+colnames(tab_4_os_cox) <- gsub("-", "_", colnames(tab_4_os_cox))  
+tab_4_os_cox <- tab_4_os_cox %>%
+  mutate_at(vars(-Sample, -sur_os,-Gender), as.numeric)
+
+os_covariates <- colnames(tab_4_os_cox[,23:ncol(tab_4_os_cox)-1])
+head(os_covariates)
+tail(os_covariates)
+
+##################### os uni
+cox_uni_results <- os_uni_cox(
+  tab_4_os_cox=tab_4_os_cox,
+  os_covariates = os_covariates,
+  cox_results_tsv = "univariate.os.cox.binary.methylation.tsv",
+  cox_results_rdata = "univariate.os.cox.binary.methylation.RData"
+)
+
+########### os multivariate cox
+
+cox_results <- os_multi_cox(
+  tab_4_os_cox=tab_4_os_cox,
+  os_covariates = os_covariates,
+  cox_results_tsv = "multivariate.os.cox.binary.methylation.tsv",
+  cox_results_rdata = "multivariate.os.cox.binary.methylation.RData"
+)
+
+
+##################### os, genebody
+tab_4_os_cox <- clin_dat[patient_id,] %>% 
+  inner_join(methylation_df_genebody, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_os")], by = "Sample") 
+
+colnames(tab_4_os_cox) <- gsub("-", "_", colnames(tab_4_os_cox))  
+tab_4_os_cox <- tab_4_os_cox %>%
+  mutate_at(vars(-Sample, -sur_os,-Gender), as.numeric)
+
+os_covariates <- colnames(tab_4_os_cox[,23:ncol(tab_4_os_cox)-1])
+head(os_covariates)
+tail(os_covariates)
+
+##################### os uni, genebody
+cox_uni_results <- os_uni_cox(
+  tab_4_os_cox=tab_4_os_cox,
+  os_covariates = os_covariates,
+  cox_results_tsv = "univariate.os.cox.binary.methylation.genebody.tsv",
+  cox_results_rdata = "univariate.os.cox.binary.methylation.genebody.RData"
+)
+
+########### os multivariate cox, genebody
+
+cox_results <- os_multi_cox(
+  tab_4_os_cox=tab_4_os_cox,
+  os_covariates = os_covariates,
+  cox_results_tsv = "multivariate.os.cox.binary.methylation.genebody.tsv",
+  cox_results_rdata = "multivariate.os.cox.binary.methylation.genebody.RData"
+)
+
+```
+
+
+##### methylation, 0/1 input, in 967 samples
+```{r}
+# load(file = "methylation_mean.RData")
+load(file = "methylation_mean.binary.RData")
+load(file = "remaining_sample_list.RData")
+load(file = "dfs_uni.cox.Rdata")
+load(file = "os_uni.cox.Rdata")
+load(file = "dfs_multi.cox.Rdata")
+load(file = "os_multi.cox.Rdata")
+load(file = "clindata_input.RData")
+load(file="532.result.Rdata")
+
+###################### dfs
+tab_4_dfs_cox <- clin_dat[all_patient_id,] %>% 
+  inner_join(methylation_df, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_dfs")], by = "Sample") 
+
+
+colnames(tab_4_dfs_cox) <- gsub("-", "_", colnames(tab_4_dfs_cox))  
+
+dfs_covariates <- colnames(tab_4_dfs_cox[,23:ncol(tab_4_dfs_cox)-1])
+dfs_covariates <- dfs_covariates[dfs_covariates %in% DFS_OS_22pair_gene$factor]
+
+tail(dfs_covariates)
+head(dfs_covariates)
+
+##################### dfs uni
+dfs_results <- dfs_uni_cox(
+  tab_4_dfs_cox=tab_4_dfs_cox,
+  dfs_covariates = dfs_covariates,
+  cox_results_tsv = "univariate.dfs.remaining_samples.cox.binary.methylation.tsv",
+  cox_results_rdata = "univariate.dfs.remaining_samples.cox.binary.methylation.RData"
+)
+
+########## dfs multivariate
+dfs_results <- dfs_multi_cox(
+  tab_4_dfs_cox=tab_4_dfs_cox,
+  dfs_covariates = dfs_covariates,
+  cox_results_tsv = "multivariate.dfs.remaining_samples.cox.binary.methylation.tsv",
+  cox_results_rdata = "multivariate.dfs.remaining_samples.cox.binary.methylation.RData"
+)
+
+
+##################### os
+tab_4_os_cox <- clin_dat[all_patient_id,] %>% 
+  inner_join(methylation_df, by = "Sample") %>% 
+  inner_join(sur_dat[, c("Sample", "sur_os")], by = "Sample") 
+
+colnames(tab_4_os_cox) <- gsub("-", "_", colnames(tab_4_os_cox))  
+tab_4_os_cox <- tab_4_os_cox %>%
+  mutate_at(vars(-Sample, -sur_os,-Gender), as.numeric)
+
+os_covariates <- colnames(tab_4_os_cox[,23:ncol(tab_4_os_cox)-1])
+os_covariates <- os_covariates[os_covariates %in% DFS_OS_22pair_gene$factor]
+
+head(os_covariates)
+tail(os_covariates)
+
+##################### os uni
+cox_uni_results <- os_uni_cox(
+  tab_4_os_cox=tab_4_os_cox,
+  os_covariates = os_covariates,
+  cox_results_tsv = "univariate.os.remaining_samples.cox.binary.methylation.tsv",
+  cox_results_rdata = "univariate.os.remaining_samples.cox.binary.methylation.RData"
+)
+
+########### os multivariate cox
+
+cox_results <- os_multi_cox(
+  tab_4_os_cox=tab_4_os_cox,
+  os_covariates = os_covariates,
+  cox_results_tsv = "multivariate.os.remaining_samples.cox.binary.methylation.tsv",
+  cox_results_rdata = "multivariate.os.remaining_samples.cox.binary.methylation.RData"
+)
+
+
+```
+
+
+
+
+
+
+### Prognostic models inputs
 ```{r}
 load(file = "clindata_input.RData")
 load(file = "methylation_mean.binary.RData")
-load(file = "1005s_RNA_FPKM_log2_plus1.RData")
+load(file = "RNA_log2_plus1.RData")
 load(file = "protein.RData")
 load(file = "sv_hotspot.RData")
 load(file = "signature.RData")
@@ -185,7 +2027,7 @@ os_selected_features <- os_sig_features_names$factor
 
 
 ## save inputs
-save(tab_4_dfs_sig_cox, tab_4_os_sig_cox, dfs_selected_features, os_selected_features, dfs_sig_features_names, os_sig_features_names, chemo_dat, file = "model_features.20250612.RData")
+save(tab_4_dfs_sig_cox, tab_4_os_sig_cox, dfs_selected_features, os_selected_features, dfs_sig_features_names, os_sig_features_names, chemo_dat, file = "model_features.RData")
 
 ```
 
@@ -307,7 +2149,7 @@ cindex_28_fun_dfs <- function(seed = 1234, tab_4_cox_28 = tab_4_dfs_sig_cox, tes
 ###### runing 1000 times 8:2 sample split (Lasso + split-validation C-index) 
 ```{r}
 
-load(file = "model_features.20250612.RData")
+load(file = "model_features.RData")
 rownames(tab_4_dfs_sig_cox) <- tab_4_dfs_sig_cox$Sample
 rownames(tab_4_os_sig_cox) <- tab_4_os_sig_cox$Sample
 
@@ -338,7 +2180,7 @@ write_tsv(cindex_28_1000res_os, file = "cindex_os_20251030.tsv")
 ###### search markers for every combinations
 ```{r}
 
-load(file = "model_features.20250612.RData")
+load(file = "model_features.RData")
 ############## use all samples dataset to filter features for every combinations
 ### create every combinations for all features, dfs 
 dfs_all_feature_types <- sort(unique(dfs_sig_features_names$omics))
@@ -455,7 +2297,7 @@ save(os_lasso_results_list, file="os.all_combn.lasso.RData")
 ```{r}
 load(file="dfs.all_combn.lasso.RData")
 load(file="os.all_combn.lasso.RData")
-load(file = "model_features.20250612.RData")
+load(file = "model_features.RData")
 
 prognosis_model_fun <- function(seed = 1234, sur_model="",features_combn = c(), input_df=data.frame()){
   
@@ -493,7 +2335,7 @@ prognosis_model_fun <- function(seed = 1234, sur_model="",features_combn = c(), 
       
     ############# return results
     cindx_tab <- list(
-      model = name,  # 特征组合名称
+      model = name,
       c_index = c_index,          # C-index
       # cox_results = cox_results,
       tab_coef_multi = tab_coef_multi,
@@ -527,7 +2369,7 @@ save(prog_model_os, file="prog_model_os.Rdata")
 ```{r}
 load(file="prog_model_dfs.Rdata")
 load(file="prog_model_os.Rdata")
-load(file = "model_features.20250612.RData")
+load(file = "model_features.RData")
 
 factor_importance_fuc <- function(model_list, name, model_name, output_dir) {
   wald_tab_tmp <- model_list$wald_tab
@@ -654,8 +2496,8 @@ plot_km_fun <- function(tab_4_kmplot, title = "", model_name, name, dirname,suff
   p1 <- ggsurvplot(km_fit_high_risk, 
            data = high_risk,
            pval = FALSE,     
-           risk.table = FALSE,    # 添加风险表
-           conf.int = FALSE,      # 显示置信区间
+           risk.table = FALSE,    
+           conf.int = FALSE,     
            palette = c("#E41A1C","#377EB8" ), 
            title = paste0(suffix," (High-risk)"),
            tables.y.text = FALSE,
@@ -666,7 +2508,6 @@ plot_km_fun <- function(tab_4_kmplot, title = "", model_name, name, dirname,suff
            legend.labs=c(paste0("Non-Chemotherapy (n=", high_risk_nonche_count,")"),
                          paste0("Chemotherapy (n=", high_risk_che_count, ")"))
            ) 
-        high_risk_nonche_count,")"), size = 5, hjust = 0) 
   plot1 <- p1$plot + annotate("text", x = 0, y = 0.15, label = formatted_p_high_risk, size = 5, hjust = 0)
   plot1 <- plot1 + annotate("text", x = 0, y = 0.05, label = HR_str_high_risk, size = 5, hjust = 0)
   
@@ -758,7 +2599,7 @@ load(file = "chemo_KM_plot.functions.template.Rdata")
 
 suffix="Stage II&III"
 model_name="sur_dfs"
-dirname="03.chemo_KM_plot.pdf/"
+dirname="chemo_KM_plot.pdf/"
 outputfile <- paste0(dirname, model_name,".","chemo_KM_results.", suffix, ".tsv")
 
 if(file.exists(outputfile)) {
@@ -766,7 +2607,7 @@ if(file.exists(outputfile)) {
   cat(outputfile," deleted")
 }
 
-Map(chemo_KM_plot_fuc, prog_model_dfs, names(prog_model_dfs), model_name="sur_dfs", dirname="03.chemo_KM_plot.pdf/")
+Map(chemo_KM_plot_fuc, prog_model_dfs, names(prog_model_dfs), model_name="sur_dfs", dirname="chemo_KM_plot.pdf/")
 
 ```
 
@@ -809,8 +2650,8 @@ plot_km_fun <- function(tab_4_kmplot, title = "", model_name, name, dirname, suf
   p1 <- ggsurvplot(km_fit, 
            data = aa,
            pval = FALSE,     
-           risk.table = TRUE,    # 添加风险表
-           conf.int = FALSE,      # 显示置信区间
+           risk.table = TRUE,   
+           conf.int = FALSE,     
            palette = c("#377EB8", "#E41A1C"), 
            title = title,
            tables.y.text = FALSE,
@@ -1032,22 +2873,22 @@ Map(KM_plot_fuc_stage_all, prog_model_os, names(prog_model_os), model_name="sur_
 
 ### stages
 model_name="sur_dfs"
-dirname="03.KM_plot.stage_split.pdf/"
+dirname="KM_plot.stage_split.pdf/"
 output_file <- paste0(dirname, model_name,".","KM_results.split_stage.tsv")
 if(file.exists(output_file)) {
   file.remove(output_file)
   cat(output_file," deleted")
 }
-Map(KM_plot_fuc_stage_split, prog_model_dfs, names(prog_model_dfs), model_name="sur_dfs",dirname="03.KM_plot.stage_split.pdf/")
+Map(KM_plot_fuc_stage_split, prog_model_dfs, names(prog_model_dfs), model_name="sur_dfs",dirname="KM_plot.stage_split.pdf/")
 
 model_name="sur_os"
-dirname="03.KM_plot.stage_split.pdf/"
+dirname="KM_plot.stage_split.pdf/"
 output_file <- paste0(dirname, model_name,".","KM_results.split_stage.tsv")
 if(file.exists(output_file)) {
   file.remove(output_file)
   cat(output_file," deleted")
 }
-Map(KM_plot_fuc_stage_split, prog_model_os, names(prog_model_os), model_name="sur_os",dirname="03.KM_plot.stage_split.pdf/")
+Map(KM_plot_fuc_stage_split, prog_model_os, names(prog_model_os), model_name="sur_os",dirname="KM_plot.stage_split.pdf/")
 
 ```
 
@@ -1361,7 +3202,7 @@ rownames(ht_input_dfs) <- c("Stage I","Stage II","Stage III","Stage IV")
 
 
 ht_input_dfs_out <- data.frame(t(ht_input_dfs),check.names=F)
-write.table(ht_input_dfs_out, "03.KM_pvalues.DFS.tsv", row.names = T, quote=F,sep="\t")
+write.table(ht_input_dfs_out, "KM_pvalues.DFS.tsv", row.names = T, quote=F,sep="\t")
 
 
 add_stars <- function(p) {
@@ -1452,15 +3293,12 @@ p_compare_os <- cindex_28_1000res_os %>%
   geom_hline(yintercept = 0.7,linetype="dashed",size=0.2,color="grey") + 
   rotate_x_text(90)+
   scale_y_continuous(breaks=c(0.5, 0.7, 0.9))+
-  # labs(title = "OS Multivariate Cox Models Performance")+
   labs(title = "")+
-  # ylim(0.55,0.9)+
   theme(legend.position = "right", 
         plot.title = element_text(hjust = 0.5, size = 10, face = "bold", family = "Arial"),
         axis.title = element_text(size = 8, family = "Arial"),
         axis.text = element_text(size = 6, family = "Arial"),
         axis.ticks.x = element_blank(),
-        # axis.text.x = element_blank(),
         axis.line=element_line(linewidth =0.2)
         )+
   guides(fill = FALSE)
@@ -1475,7 +3313,7 @@ rownames(ht_input_os) <- c("Stage I","Stage II","Stage III","Stage IV")
 
 
 ht_input_os_out <- data.frame(t(ht_input_os),check.names=F)
-write.table(ht_input_os_out, "03.KM_pvalues.OS.tsv", row.names = T, quote=F,sep="\t")
+write.table(ht_input_os_out, "KM_pvalues.OS.tsv", row.names = T, quote=F,sep="\t")
 
 
 ### add stars function

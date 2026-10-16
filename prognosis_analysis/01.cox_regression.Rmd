@@ -943,7 +943,6 @@ dfs_results <- dfs_uni_cox(
 )
 
 ########### dfs multivariate
-# 调用函数
 dfs_results <- dfs_multi_cox(
   dfs_covariates = dfs_covariates,
   tab_4_dfs_cox=tab_4_dfs_cox,
@@ -1313,9 +1312,6 @@ dfs_multi_results <- dfs_multi_cox(
 tab_4_os_cox <- clin_dat[all_patient_id,] %>% 
   inner_join(snv_driver_tab, by = "Sample") %>% 
   inner_join(sur_dat[, c("Sample", "sur_os")], by = "Sample") 
-
-# colnames(tab_4_os_cox) <- gsub("-", "_", colnames(tab_4_os_cox))  
-# colnames(tab_4_os_cox) <- gsub(",", ".", colnames(tab_4_os_cox))  
 
 tab_4_os_cox$Gender <- factor(tab_4_os_cox$Gender,levels = c("0","1"))
 tab_4_os_cox <- tab_4_os_cox %>%
