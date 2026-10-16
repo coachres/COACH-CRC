@@ -1,4 +1,4 @@
-# Integrative Multi-omics Analysis of Chinese Colorectal Cancers
+# Multi-omics Analysis of Chinese Colorectal Cancers
 
 ## Introduction
 
